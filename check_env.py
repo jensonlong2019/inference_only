@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""环境自检：安装后或排错时运行，python check_env.py"""
+"""环境自检：安装后或排错时运行，python3 check_env.py"""
 import argparse
 import importlib
 import os
@@ -90,9 +90,73 @@ def main():
             print("    安装: sudo apt install ffmpeg")
         ok = False
 
+    section("模型权重（Git 不含大文件，需单独拷贝）")
+    pretrained = os.path.join(root, "GPT_SoVITS", "pretrained_models")
+    pretrained_required = [
+        "chinese-hubert-base/pytorch_model.bin",
+        "chinese-roberta-wwm-ext-large/pytorch_model.bin",
+    ]
+    if os.path.isdir(pretrained):
+        missing_pre = [
+            p
+            for p in pretrained_required
+            if not os.path.isfile(os.path.join(pretrained, p))
+        ]
+        if missing_pre:
+            print(f"  ✗ pretrained_models 不完整，缺少: {', '.join(missing_pre)}")
+            ok = False
+        else:
+            print("  ✓ GPT_SoVITS/pretrained_models")
+    else:
+        print("  ✗ 缺少 GPT_SoVITS/pretrained_models/（约 1.4G，需单独转发）")
+        ok = False
+
+    def _has_weight(dirs, exts, also_paths=None):
+        for d in dirs:
+            dp = os.path.join(root, d)
+            if not os.path.isdir(dp):
+                continue
+            for name in os.listdir(dp):
+                if any(name.endswith(e) for e in exts):
+                    return True
+        for p in also_paths or []:
+            if os.path.isfile(os.path.join(root, p)):
+                return True
+        return False
+
+    gpt_ok = _has_weight(
+        ["GPT_weights_v2", "GPT_weights"],
+        [".ckpt"],
+        also_paths=[
+            "GPT_SoVITS/pretrained_models/gsv-v2final-pretrained/s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt",
+            "GPT_SoVITS/pretrained_models/s1bert25hz-2kh-longer-epoch=68e-step=50232.ckpt",
+        ],
+    )
+    sovits_ok = _has_weight(
+        ["SoVITS_weights_v2", "SoVITS_weights"],
+        [".pth"],
+        also_paths=[
+            "GPT_SoVITS/pretrained_models/gsv-v2final-pretrained/s2G2333k.pth",
+            "GPT_SoVITS/pretrained_models/s2G488k.pth",
+        ],
+    )
+    print(f"  {'✓' if gpt_ok else '✗'} GPT 权重 (.ckpt)")
+    print(f"  {'✓' if sovits_ok else '✗'} SoVITS 权重 (.pth)")
+    if not gpt_ok or not sovits_ok:
+        print("    请拷贝 GPT_weights_v2/、SoVITS_weights_v2/，或完整 pretrained_models/")
+        ok = False
+
+    g2pw = os.path.join(root, "GPT_SoVITS", "text", "G2PWModel", "g2pW.onnx")
+    if os.path.isfile(g2pw):
+        print("  ✓ G2PWModel/g2pW.onnx")
+    else:
+        print("  ⚠ 缺少 GPT_SoVITS/text/G2PWModel/g2pW.onnx（中文多音字可能受影响）")
+
     if args.quick:
         if not ok:
-            print("\n环境检查未通过，请运行: bash setup.sh")
+            print("\n环境检查未通过。")
+            print("  依赖问题: bash setup.sh")
+            print("  权重缺失: 向维护者索取 pretrained_models / GPT_weights_v2 / SoVITS_weights_v2")
             return 1
         print("\n快速检查通过。")
         return 0
@@ -143,6 +207,7 @@ def main():
         return 0
     print("  环境未就绪，请执行:")
     print("    rm -rf venv && bash setup.sh")
+    print("  注意 macOS/Linux 用 python3，不要用 python")
     print("  若仍失败，把本脚本完整输出发给维护者。")
     return 1
 

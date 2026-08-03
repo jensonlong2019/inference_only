@@ -91,7 +91,7 @@ if [ -f "check_env.py" ]; then
     if ! $PYTHON_CMD check_env.py --quick 2>/dev/null; then
         echo ""
         echo "环境检查未通过，请先运行: bash setup.sh"
-        echo "或查看详情: python check_env.py"
+        echo "或查看详情: python3 check_env.py"
         exit 1
     fi
 fi

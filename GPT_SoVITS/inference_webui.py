@@ -121,6 +121,23 @@ if os.path.exists(f"./weight.json"):
 else:
     with open(f"./weight.json", 'w', encoding="utf-8") as file:json.dump({'GPT':{},'SoVITS':{}},file)
 
+def _first_existing_weight(candidates, roots, exts):
+    """从候选路径 / 权重目录中挑出第一个存在的模型文件。"""
+    if isinstance(candidates, str):
+        candidates = [candidates]
+    for p in candidates or []:
+        if p and os.path.isfile(p):
+            return p
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        for name in sorted(os.listdir(root)):
+            if any(name.endswith(ext) for ext in exts):
+                path = os.path.join(root, name)
+                if os.path.isfile(path):
+                    return path
+    return None
+
 with open(f"./weight.json", 'r', encoding="utf-8") as file:
     weight_data = file.read()
     weight_data=json.loads(weight_data)
@@ -128,10 +145,39 @@ with open(f"./weight.json", 'r', encoding="utf-8") as file:
         "gpt_path", weight_data.get('GPT',{}).get(version,pretrained_gpt_name))
     sovits_path = os.environ.get(
         "sovits_path", weight_data.get('SoVITS',{}).get(version,pretrained_sovits_name))
-    if isinstance(gpt_path,list):
-        gpt_path = gpt_path[0]
-    if isinstance(sovits_path,list):
-        sovits_path = sovits_path[0]
+    # weight.json / 环境变量优先；不存在则回退到 pretrained 与权重目录扫描
+    def _merge_candidates(primary, fallbacks):
+        out = []
+        for item in ([primary] if isinstance(primary, str) else (primary or [])):
+            if item and item not in out:
+                out.append(item)
+        for item in fallbacks or []:
+            if item and item not in out:
+                out.append(item)
+        return out
+    gpt_path = _first_existing_weight(
+        _merge_candidates(gpt_path, pretrained_gpt_name),
+        ["GPT_weights_v2", "GPT_weights"],
+        [".ckpt"],
+    )
+    sovits_path = _first_existing_weight(
+        _merge_candidates(sovits_path, pretrained_sovits_name),
+        ["SoVITS_weights_v2", "SoVITS_weights"],
+        [".pth"],
+    )
+    if not gpt_path or not sovits_path:
+        print("=" * 60)
+        print("错误: 未找到可用的 GPT / SoVITS 模型权重，无法启动。")
+        print("")
+        print("请把以下目录完整拷贝到本项目根目录（与 GPT_SoVITS 同级）：")
+        print("  1) GPT_SoVITS/pretrained_models/   # 预训练底座（必需）")
+        print("  2) GPT_weights_v2/                 # 微调 GPT .ckpt（可选，有则优先）")
+        print("  3) SoVITS_weights_v2/              # 微调 SoVITS .pth（可选，有则优先）")
+        print("")
+        print(f"当前 GPT:    {gpt_path or '未找到'}")
+        print(f"当前 SoVITS: {sovits_path or '未找到'}")
+        print("=" * 60)
+        sys.exit(1)
 
 cnhubert_base_path = os.environ.get(
     "cnhubert_base_path", "GPT_SoVITS/pretrained_models/chinese-hubert-base"
