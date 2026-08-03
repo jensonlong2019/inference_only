@@ -1,0 +1,52 @@
+# GPT-SoVITS 推理功能依赖包
+
+# 核心依赖（固定 2.3.1，避免 2.6+ 的 torch.load 兼容问题）
+torch==2.3.1
+torchaudio==2.3.1
+numpy>=1.21.0,<2
+scipy
+einops
+pytorch-lightning
+
+# WebUI
+gradio>=4.44.1,<=4.44.1
+markupsafe~=2.1.5
+fastapi==0.112.4
+starlette==0.38.2
+
+# 音频处理
+librosa>=0.9.0
+soundfile
+ffmpeg-python
+
+# 文本处理
+transformers>=4.20.0,<4.46.0
+huggingface_hub<1.0
+sentencepiece
+jieba
+# jieba_fast is optional and may require C++ build tools on Windows
+# jieba_fast
+# PyPI 0.2.0 的 __init__.py 会引用不存在的 setLangfilters，需用 0.3.5 备份源（setup.sh 会安装）
+# LangSegment @ git+https://github.com/chameleon-ai/LangSegment-0.3.5-backup.git
+pypinyin
+cn2an
+nltk
+wordsegment
+g2p_en
+
+# 数据处理
+pandas
+openpyxl
+
+# 其他工具
+tqdm
+chardet
+PyYAML
+onnxruntime>=1.16.0
+opencc-python-reimplemented
+
+# 可选：多语种支持（根据需要安装）
+# pyopenjtalk>=0.3.4  # 日文
+# g2pk2  # 韩文
+# pyjyutping  # 粤语
+

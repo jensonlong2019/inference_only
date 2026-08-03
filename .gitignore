@@ -1,0 +1,49 @@
+# --- 大文件：单独网盘/U盘转发，不要进 GitHub ---
+# 预训练底座模型 (~1.4G，含 >100MB 的 .bin/.pth/.ckpt)
+/GPT_SoVITS/pretrained_models/
+
+# G2P 中文读音模型 (~608M，g2pW.onnx)
+/GPT_SoVITS/text/G2PWModel/
+
+# 微调后的 GPT / SoVITS 权重
+/GPT_weights/
+/GPT_weights_v2/
+/SoVITS_weights/
+/SoVITS_weights_v2/
+
+
+# 训练/参考原始音频数据 (~661M)
+/DATA-physics/
+
+# 推理生成产物
+/output/
+
+# --- 本地环境与缓存 ---
+/venv/
+/.venv/
+/env/
+__pycache__/
+*.py[cod]
+*.pyo
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+
+# 用户本地配置（指向本机权重路径）
+/user_cache.json
+/weight.json
+
+# 打包产物
+/node_modules/
+/dist/
+/build/
+*.zip
+*.tar
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.tar.lzma
+*.tar.lz
+*.tar.lzo
+*.tar.lrz
