@@ -38,6 +38,9 @@ def main():
     )
     print(f"  虚拟环境: {'是' if in_venv else '否（建议先 source venv/bin/activate）'}")
 
+    deps_ok = True
+    models_ok = True
+
     section("关键依赖")
     required = [
         "torch",
@@ -60,7 +63,12 @@ def main():
         if good:
             versions[mod] = info
         else:
-            ok = False
+            deps_ok = False
+
+    np_ver = versions.get("numpy", "")
+    if np_ver.startswith("2."):
+        print(f"  ✗ numpy {np_ver}：需 numpy<2，请执行: pip install 'numpy>=1.26,<2'")
+        deps_ok = False
 
     section("系统工具")
     root = os.path.dirname(os.path.abspath(__file__))
@@ -88,7 +96,7 @@ def main():
             print("    安装: https://ffmpeg.org/download.html 并加入 PATH")
         else:
             print("    安装: sudo apt install ffmpeg")
-        ok = False
+        deps_ok = False
 
     section("模型权重（Git 不含大文件，需单独拷贝）")
     pretrained = os.path.join(root, "GPT_SoVITS", "pretrained_models")
@@ -104,12 +112,12 @@ def main():
         ]
         if missing_pre:
             print(f"  ✗ pretrained_models 不完整，缺少: {', '.join(missing_pre)}")
-            ok = False
+            models_ok = False
         else:
             print("  ✓ GPT_SoVITS/pretrained_models")
     else:
         print("  ✗ 缺少 GPT_SoVITS/pretrained_models/（约 1.4G，需单独转发）")
-        ok = False
+        models_ok = False
 
     def _has_weight(dirs, exts, also_paths=None):
         for d in dirs:
@@ -144,7 +152,7 @@ def main():
     print(f"  {'✓' if sovits_ok else '✗'} SoVITS 权重 (.pth)")
     if not gpt_ok or not sovits_ok:
         print("    请拷贝 GPT_weights_v2/、SoVITS_weights_v2/，或完整 pretrained_models/")
-        ok = False
+        models_ok = False
 
     g2pw = os.path.join(root, "GPT_SoVITS", "text", "G2PWModel", "g2pW.onnx")
     if os.path.isfile(g2pw):
@@ -152,12 +160,19 @@ def main():
     else:
         print("  ⚠ 缺少 GPT_SoVITS/text/G2PWModel/g2pW.onnx（中文多音字可能受影响）")
 
+    ok = deps_ok and models_ok
+
     if args.quick:
-        if not ok:
-            print("\n环境检查未通过。")
-            print("  依赖问题: bash setup.sh")
-            print("  权重缺失: 向维护者索取 pretrained_models / GPT_weights_v2 / SoVITS_weights_v2")
+        # setup.sh 只要求依赖通过；权重缺失单独提示，不判失败
+        if not deps_ok:
+            print("\n依赖检查未通过，请运行: bash setup.sh")
             return 1
+        if not models_ok:
+            print("\n依赖已就绪。下一步：向维护者索取并拷贝模型目录后再启动。")
+            print("  - GPT_SoVITS/pretrained_models/")
+            print("  - GPT_weights_v2/ 与 SoVITS_weights_v2/")
+            print("  - 建议: GPT_SoVITS/text/G2PWModel/")
+            return 0
         print("\n快速检查通过。")
         return 0
 
@@ -172,20 +187,15 @@ def main():
             print(f"  ⚠ torch {torch_ver}：需使用项目内置 safe_torch_load（已修复）")
         else:
             print(f"  ✓ torch {torch_ver}")
-
-    np_ver = versions.get("numpy", "")
-    if np_ver.startswith("2."):
-        print(f"  ✗ numpy {np_ver}：需 numpy<2，请重新运行 setup.sh")
-        ok = False
-    elif np_ver:
+    if np_ver and not np_ver.startswith("2."):
         print(f"  ✓ numpy {np_ver}")
 
     section("项目模块导入")
-    root = os.path.dirname(os.path.abspath(__file__))
     gpt = os.path.join(root, "GPT_SoVITS")
     if gpt not in sys.path:
         sys.path.insert(0, gpt)
-    sys.path.insert(0, root)
+    if root not in sys.path:
+        sys.path.insert(0, root)
 
     modules = [
         ("utils", "safe_torch_load"),
@@ -199,16 +209,21 @@ def main():
             print(f"  ✓ {mod}.{attr}")
         except Exception as e:
             print(f"  ✗ {mod}.{attr}: {e}")
-            ok = False
+            deps_ok = False
 
+    ok = deps_ok and models_ok
     section("结论")
     if ok:
         print("  环境就绪，可运行: ./start_inference.sh")
         return 0
-    print("  环境未就绪，请执行:")
-    print("    rm -rf venv && bash setup.sh")
-    print("  注意 macOS/Linux 用 python3，不要用 python")
-    print("  若仍失败，把本脚本完整输出发给维护者。")
+    if not deps_ok:
+        print("  依赖未就绪，请执行:")
+        print("    rm -rf venv && bash setup.sh")
+        print("  注意 macOS/Linux 用 python3，不要用 python")
+    if not models_ok:
+        print("  权重未就绪，请向维护者索取并拷贝:")
+        print("    GPT_SoVITS/pretrained_models/")
+        print("    GPT_weights_v2/ 与 SoVITS_weights_v2/")
     return 1
 
 

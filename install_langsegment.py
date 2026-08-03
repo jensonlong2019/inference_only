@@ -55,6 +55,8 @@ def main():
             continue
         try:
             verify()
+            # LangSegment 依赖可能把 numpy 升到 2.x，钉回 1.x
+            pip("install", "--upgrade", "numpy>=1.26.0,<2")
             return 0
         except Exception as e:
             print(f"安装后验证失败: {e}")

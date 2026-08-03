@@ -59,23 +59,19 @@ pip install -r requirements.txt
 
 echo "锁定兼容版本 ..."
 pip install --upgrade --force-reinstall \
-    "numpy<2" \
+    "numpy>=1.26.0,<2" \
     "huggingface_hub<1.0" \
     "markupsafe~=2.1.5" \
     "transformers<4.46.0" \
     "fastapi==0.112.4" \
     "starlette==0.38.2" \
     "pydantic<2.10" \
-    "urllib3<2"
+    "urllib3>=2.0,<3"
 
-# macOS 系统 Python 链的 LibreSSL 警告
-if [[ "$(uname -s)" == "Darwin" ]]; then
-    pip install "urllib3<2" 2>/dev/null || true
-fi
-
-# LangSegment：PyPI 0.2.0 有 bug
+# LangSegment：PyPI 0.2.0 有 bug（安装后会再次钉死 numpy，防止被升到 2.x）
 echo "安装 LangSegment ..."
 python install_langsegment.py
+pip install --upgrade "numpy>=1.26.0,<2"
 
 # 5. 验证
 echo ""
