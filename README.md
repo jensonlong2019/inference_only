@@ -139,9 +139,19 @@ pip install LangSegment
 
 ## 📤 分享给他人
 
-### 准备分享包
+大模型文件**不进 GitHub**，需单独用网盘 / U 盘转发。完整清单与打包命令见：
 
-在分享前，建议先清理不必要的文件：
+**[模型文件清单.md](./模型文件清单.md)**
+
+简要：对方拉代码并 `bash setup.sh` 后，还需拷贝：
+
+- `GPT_SoVITS/pretrained_models/`（必需）
+- `GPT_weights_v2/`、`SoVITS_weights_v2/`（必需）
+- `GPT_SoVITS/text/G2PWModel/`（强烈建议）
+
+### 准备分享包（仅代码侧清理）
+
+在分享前，可清理缓存：
 
 **Linux/Mac:**
 ```bash
@@ -154,29 +164,13 @@ chmod +x clean_for_sharing.sh
 clean_for_sharing.bat
 ```
 
-### 压缩打包
+代码仓库包含：
+- ✅ 核心推理代码、启动脚本、依赖列表、文档
 
-```bash
-# Linux/Mac
-zip -r GPT-SoVITS-Inference.zip inference_only/
-
-# Windows
-# 右键点击 inference_only 文件夹，选择"发送到" -> "压缩(zipped)文件夹"
-```
-
-### 分享内容
-
-压缩包包含：
-- ✅ 所有核心推理代码
-- ✅ 预训练模型（基础模型）
-- ✅ 启动脚本和依赖列表
-- ✅ 使用文档
-
-**不包含**（需要接收者自己添加）：
-- ❌ 用户训练的模型权重（需要放在 `GPT_weights_v2/` 和 `SoVITS_weights_v2/`）
-- ❌ Python 虚拟环境（接收者需要自己安装依赖）
-- ❌ 用户生成的文件和缓存
-
+需单独转发（见清单）：
+- ❌ 预训练模型、微调权重、G2PW 模型
+- ❌ Python 虚拟环境（接收者自己 `setup.sh`）
+- ❌ 用户生成文件与训练原始音频
 ## 📌 注意事项
 
 1. 首次运行可能需要下载一些 NLTK 资源，请保持网络连接

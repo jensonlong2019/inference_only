@@ -1714,7 +1714,70 @@ if init_sovits_path and init_sovits_path in SoVITS_names:
 change_sovits_weights(sovits_path)
 change_gpt_weights(gpt_path)
 
-with gr.Blocks(title="GPT-SoVITS WebUI") as app:
+# 批量生成页：吸底操作栏 + 表格内部独立滚动（避免整页跟着滑/编辑时跳动）
+_BATCH_UI_CSS = """
+.batch-sticky-actions {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 1000;
+    background: var(--body-background-fill, var(--background-fill-primary, #fff));
+    padding: 10px 16px 12px;
+    border-top: 1px solid var(--border-color-primary, #e5e5e5);
+    box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.08);
+}
+/* 避免底部固定栏遮挡结果表格与操作区 */
+#batch_results_df {
+    margin-bottom: 72px;
+}
+#batch_preview_df .table-wrap,
+#batch_results_df .table-wrap,
+#batch_preview_df .overflow-y-auto,
+#batch_results_df .overflow-y-auto,
+#batch_preview_df .svelte-1ipelgc,
+#batch_results_df .svelte-1ipelgc {
+    max-height: 420px !important;
+    overflow: auto !important;
+    overflow-anchor: none;
+    overscroll-behavior: contain;
+}
+#batch_preview_df table,
+#batch_results_df table {
+    table-layout: fixed !important;
+    width: 100% !important;
+}
+#batch_preview_df td,
+#batch_preview_df th,
+#batch_results_df td,
+#batch_results_df th {
+    vertical-align: middle !important;
+}
+/* 第一列宽度固定，减少编辑引起的列宽重算跳动 */
+#batch_preview_df th:first-child,
+#batch_preview_df td:first-child {
+    width: 90px !important;
+    min-width: 90px !important;
+    max-width: 90px !important;
+}
+#batch_results_df th:first-child,
+#batch_results_df td:first-child {
+    width: 100px !important;
+    min-width: 100px !important;
+    max-width: 100px !important;
+}
+#batch_preview_df input,
+#batch_results_df input {
+    min-height: 28px;
+}
+/* 表格滚动时不把滚轮链式传递给页面，其它板块不跟着滑 */
+#batch_preview_df,
+#batch_results_df {
+    overscroll-behavior: contain;
+}
+"""
+
+with gr.Blocks(title="GPT-SoVITS WebUI", css=_BATCH_UI_CSS) as app:
     gr.Markdown(
         value=i18n("本软件以MIT协议开源, 作者不对软件具备任何控制力, 使用软件者、传播软件导出的声音者自负全责. <br>如不认可该条款, 则不能使用或引用软件包内任何代码和文件. 详见根目录<b>LICENSE</b>.")
     )
@@ -1904,18 +1967,30 @@ with gr.Blocks(title="GPT-SoVITS WebUI") as app:
                 # 【关键修复】预设一个足够长的 datatype 列表，确保第一列始终被识别为 bool (Checkbox)
                 # 后面预设 100 列为 str，通常够用了。Gradio 会根据这个配置渲染对应列。
                 # 这样即使不能动态更新 datatype，也能利用初始化的配置。
-                DEFAULT_DATATYPE = ["str"] + ["str"] * 100
+                DEFAULT_DATATYPE = ["bool"] + ["str"] * 100
                 
                 batch_preview = gr.DataFrame(
                     label="完整数据预览与编辑", 
-                    value=[["t", "示例文件名", "示例内容"]], 
+                    value=[[True, "示例文件名", "示例内容"]], 
                     headers=["是否处理", "文件名", "文本内容"], 
                     interactive=True,
                     type="pandas",
                     wrap=True,
+                    height=420,
+                    elem_id="batch_preview_df",
+                    column_widths=["90px", "180px", "60%"],
                     # col_count=(3, "dynamic"), 
                     datatype=DEFAULT_DATATYPE 
                 )
+
+                def _to_process_bool(val):
+                    """将「是否处理」统一为 bool，避免字符串 f/t 编辑引发表格跳动。"""
+                    if isinstance(val, (bool, np.bool_)):
+                        return bool(val)
+                    if val is None:
+                        return False
+                    s = str(val).strip().lower()
+                    return s in ("true", "1", "yes", "是", "on", "t")
 
                 # 批量修改状态的函数
                 def set_all_status(df, status):
@@ -1924,16 +1999,16 @@ with gr.Blocks(title="GPT-SoVITS WebUI") as app:
                     try:
                         # 确保第一列存在
                         if len(df.columns) > 0:
-                            # 修改第一列的所有值为 status ("t"/"f")
-                            df.iloc[:, 0] = status
+                            # 修改第一列的所有值为 status (True/False)
+                            df.iloc[:, 0] = bool(status)
                         return gr.update(value=df)
                     except Exception as e:
                         print(f"Error updating dataframe: {e}")
                         return gr.update()
 
                 # 绑定按钮事件
-                btn_check_all.click(lambda df: set_all_status(df, "t"), [batch_preview], [batch_preview])
-                btn_uncheck_all.click(lambda df: set_all_status(df, "f"), [batch_preview], [batch_preview])
+                btn_check_all.click(lambda df: set_all_status(df, True), [batch_preview], [batch_preview])
+                btn_uncheck_all.click(lambda df: set_all_status(df, False), [batch_preview], [batch_preview])
 
                 # 核心读取逻辑提取
                 def read_excel_with_sheet(file, sheet_name=None):
@@ -1966,9 +2041,11 @@ with gr.Blocks(title="GPT-SoVITS WebUI") as app:
                         df.dropna(how='all', inplace=True)
                         df.reset_index(drop=True, inplace=True)
                         
-                        # 5. 插入状态列
+                        # 5. 插入/规范化状态列（统一为 bool，兼容 Excel 中的 t/f 等写法）
                         if "是否处理" not in df.columns:
-                            df.insert(0, "是否处理", "t")
+                            df.insert(0, "是否处理", True)
+                        else:
+                            df["是否处理"] = df["是否处理"].map(_to_process_bool)
                         
                         # 6. 类型转换
                         for col in df.columns[1:]:
@@ -2062,11 +2139,6 @@ with gr.Blocks(title="GPT-SoVITS WebUI") as app:
                     btn_open_folder = gr.Button("📁 打开文件夹", variant="secondary", scale=1)
                     batch_output_format = gr.Radio(label="输出格式", choices=["wav", "mp3"], value="mp3", scale=1)
                 
-                with gr.Row():
-                    batch_btn = gr.Button("开始批量生成", variant="primary", scale=2)
-                    batch_pause = gr.Button("暂停", variant="secondary", scale=1)
-                    batch_stop = gr.Button("终止", variant="stop", scale=1)
-                
                 batch_status = gr.Textbox(label="处理状态")
 
                 # 绑定打开文件夹按钮
@@ -2082,14 +2154,22 @@ with gr.Blocks(title="GPT-SoVITS WebUI") as app:
                     datatype=["bool", "str", "str", "html"],
                     interactive=True,
                     wrap=True,
+                    height=420,
+                    elem_id="batch_results_df",
+                    column_widths=["100px", "160px", "35%", "30%"],
                 )
                 
                 with gr.Row():
                     gr.Markdown(
-                        "在「待重生成」列勾选不满意的行，试听结束后点击「批量重新生成勾选行」统一重做；「清除勾选」可一键取消所有勾选。"
+                        "在「待重生成」列勾选不满意的行，试听结束后点击「批量重新生成勾选行」统一重做；重新生成后仅展示本次成功重做的结果。「清除勾选」可一键取消所有勾选。"
                     )
-                with gr.Row():
-                    btn_regen_checked = gr.Button("批量重新生成勾选行", variant="primary", scale=1)
+
+                # 操作按钮吸底：生成 / 暂停 / 终止 + 重新生成 / 清除勾选
+                with gr.Row(elem_id="batch_action_bar", elem_classes=["batch-sticky-actions"]):
+                    batch_btn = gr.Button("开始批量生成", variant="primary", scale=2)
+                    batch_pause = gr.Button("暂停", variant="secondary", scale=1)
+                    batch_stop = gr.Button("终止", variant="stop", scale=1)
+                    btn_regen_checked = gr.Button("批量重新生成勾选行", variant="primary", scale=2)
                     btn_clear_regen_marks = gr.Button("清除勾选", variant="secondary", scale=1)
 
                 def _batch_result_row_marked(val):
@@ -2141,14 +2221,15 @@ with gr.Blocks(title="GPT-SoVITS WebUI") as app:
                     abs_output_dir = os.path.abspath(output_dir)
                     os.makedirs(abs_output_dir, exist_ok=True)
 
-                    df_updated = df.copy()
+                    # 重新生成后仅保留本次成功重做的结果，未勾选/未重做的行不再展示
+                    regenerated_rows = []
                     ok_names = []
                     err_msgs = []
 
                     for idx in marked_indices:
                         cache = {}
-                        filename = str(df_updated.iloc[idx, 1]).strip()
-                        text = str(df_updated.iloc[idx, 2]).strip()
+                        filename = str(df.iloc[idx, 1]).strip()
+                        text = str(df.iloc[idx, 2]).strip()
                         if not filename or not text:
                             err_msgs.append(f"第 {idx + 1} 行: 文件名或文本为空，已跳过")
                             continue
@@ -2184,8 +2265,7 @@ with gr.Blocks(title="GPT-SoVITS WebUI") as app:
                                 timestamp = int(time.time())
                                 audio_url = f"/file={final_path}?t={timestamp}"
                                 audio_html = f'<audio controls src="{audio_url}"></audio>'
-                                df_updated.iloc[idx, 0] = False
-                                df_updated.iloc[idx, 3] = audio_html
+                                regenerated_rows.append([False, filename, text, audio_html])
                                 ok_names.append(filename)
                             else:
                                 err_msgs.append(f"{filename}: 生成结果为空")
@@ -2198,10 +2278,11 @@ with gr.Blocks(title="GPT-SoVITS WebUI") as app:
                     parts = []
                     if ok_names:
                         parts.append(f"已重新生成 {len(ok_names)} 条: " + "、".join(ok_names[:20]) + ("…" if len(ok_names) > 20 else ""))
+                        parts.append("结果预览仅显示本次重生成条目")
                     if err_msgs:
                         parts.append("部分失败: " + "; ".join(err_msgs[:10]) + ("…" if len(err_msgs) > 10 else ""))
                     msg = " | ".join(parts) if parts else "未处理任何行"
-                    return msg, {"value": df_updated, "__type__": "update"}
+                    return msg, {"value": regenerated_rows, "__type__": "update"}
 
                 btn_regen_checked.click(
                     regenerate_checked_rows,
