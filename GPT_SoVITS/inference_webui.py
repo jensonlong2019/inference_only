@@ -1751,7 +1751,24 @@ _BATCH_UI_CSS = """
 #batch_preview_df th,
 #batch_results_df td,
 #batch_results_df th {
-    vertical-align: middle !important;
+    vertical-align: top !important;
+}
+/* 单元格允许多行换行显示，避免长句挤成一条 */
+#batch_preview_df td,
+#batch_results_df td {
+    white-space: pre-wrap !important;
+    word-break: break-word !important;
+    overflow-wrap: anywhere !important;
+    line-height: 1.45 !important;
+    min-height: 2.6em;
+}
+#batch_preview_df td > div,
+#batch_results_df td > div,
+#batch_preview_df td span,
+#batch_results_df td span {
+    white-space: pre-wrap !important;
+    word-break: break-word !important;
+    overflow-wrap: anywhere !important;
 }
 /* 第一列宽度固定，减少编辑引起的列宽重算跳动 */
 #batch_preview_df th:first-child,
@@ -1774,6 +1791,12 @@ _BATCH_UI_CSS = """
 #batch_preview_df,
 #batch_results_df {
     overscroll-behavior: contain;
+}
+/* 大编辑区：更舒适地改长文案 */
+#batch_cell_editor textarea {
+    min-height: 140px !important;
+    line-height: 1.5 !important;
+    font-size: 14px !important;
 }
 """
 
@@ -1970,7 +1993,7 @@ with gr.Blocks(title="GPT-SoVITS WebUI", css=_BATCH_UI_CSS) as app:
                 DEFAULT_DATATYPE = ["bool"] + ["str"] * 100
                 
                 batch_preview = gr.DataFrame(
-                    label="完整数据预览与编辑", 
+                    label="完整数据预览与编辑（长文案建议用下方大框修改，可避免表格内联编辑被双击清空）", 
                     value=[[True, "示例文件名", "示例内容"]], 
                     headers=["是否处理", "文件名", "文本内容"], 
                     interactive=True,
@@ -1983,6 +2006,33 @@ with gr.Blocks(title="GPT-SoVITS WebUI", css=_BATCH_UI_CSS) as app:
                     datatype=DEFAULT_DATATYPE 
                 )
 
+                # 大框编辑区：支持分行显示/编辑长文案，降低表格单元格内联编辑误清空风险
+                with gr.Group(elem_id="batch_cell_editor"):
+                    gr.Markdown(
+                        "### 单行大框编辑（推荐改文案用这里）  \n"
+                        "在上方表格点击某一单元格，或填写行号后点「读取该行」；在多行输入框中修改，再点「写回表格」。"
+                    )
+                    with gr.Row():
+                        edit_row_idx = gr.Number(
+                            label="行号（从 1 开始）",
+                            value=1,
+                            precision=0,
+                            minimum=1,
+                            scale=1,
+                        )
+                        edit_filename = gr.Textbox(label="文件名", lines=1, max_lines=2, scale=2)
+                    edit_text = gr.Textbox(
+                        label="文本内容（支持多行）",
+                        lines=6,
+                        max_lines=20,
+                        elem_id="batch_edit_text",
+                    )
+                    with gr.Row():
+                        btn_load_edit_row = gr.Button("读取该行", variant="secondary", scale=1)
+                        btn_apply_edit_row = gr.Button("写回表格", variant="primary", scale=1)
+                        btn_prev_edit_row = gr.Button("上一行", variant="secondary", scale=1)
+                        btn_next_edit_row = gr.Button("下一行", variant="secondary", scale=1)
+
                 def _to_process_bool(val):
                     """将「是否处理」统一为 bool，避免字符串 f/t 编辑引发表格跳动。"""
                     if isinstance(val, (bool, np.bool_)):
@@ -1991,6 +2041,80 @@ with gr.Blocks(title="GPT-SoVITS WebUI", css=_BATCH_UI_CSS) as app:
                         return False
                     s = str(val).strip().lower()
                     return s in ("true", "1", "yes", "是", "on", "t")
+
+                def _safe_row_index(df, row_num):
+                    """1-based 行号转 0-based 下标，并夹在合法范围内。"""
+                    if df is None or (hasattr(df, "empty") and df.empty):
+                        return None
+                    try:
+                        n = int(float(row_num))
+                    except Exception:
+                        n = 1
+                    if n < 1:
+                        n = 1
+                    if n > len(df):
+                        n = len(df)
+                    return n - 1
+
+                def _pick_name_text_cols(df, name_col, text_col):
+                    cols = list(df.columns) if df is not None else []
+                    nc = name_col if name_col in cols else (cols[1] if len(cols) > 1 else None)
+                    tc = text_col if text_col in cols else (cols[2] if len(cols) > 2 else (cols[1] if len(cols) > 1 else None))
+                    return nc, tc
+
+                def load_edit_row(df, row_num, name_col, text_col):
+                    if df is None or (hasattr(df, "empty") and df.empty):
+                        return 1, "", "当前表格为空，请先上传 Excel"
+                    idx = _safe_row_index(df, row_num)
+                    if idx is None:
+                        return 1, "", "当前表格为空，请先上传 Excel"
+                    nc, tc = _pick_name_text_cols(df, name_col, text_col)
+                    filename = "" if nc is None else str(df.iloc[idx][nc] if nc in df.columns else "")
+                    text = "" if tc is None else str(df.iloc[idx][tc] if tc in df.columns else "")
+                    if filename.lower() == "nan":
+                        filename = ""
+                    if text.lower() == "nan":
+                        text = ""
+                    return idx + 1, filename, text
+
+                def apply_edit_row(df, row_num, filename, text, name_col, text_col):
+                    if df is None or (hasattr(df, "empty") and df.empty):
+                        return gr.update(), "当前表格为空，无法写回"
+                    idx = _safe_row_index(df, row_num)
+                    if idx is None:
+                        return gr.update(), "当前表格为空，无法写回"
+                    nc, tc = _pick_name_text_cols(df, name_col, text_col)
+                    if nc is None and tc is None:
+                        return gr.update(), "找不到文件名/文本列，请先选择对应列"
+                    out = df.copy()
+                    # 用位置赋值，兼容非连续 index
+                    if nc is not None and nc in out.columns:
+                        out.iat[idx, out.columns.get_loc(nc)] = "" if filename is None else str(filename)
+                    if tc is not None and tc in out.columns:
+                        out.iat[idx, out.columns.get_loc(tc)] = "" if text is None else str(text)
+                    return gr.update(value=out), f"已写回第 {idx + 1} 行（可继续改下一行）"
+
+                def shift_edit_row(df, row_num, name_col, text_col, delta):
+                    if df is None or (hasattr(df, "empty") and df.empty):
+                        return 1, "", ""
+                    try:
+                        cur = int(float(row_num))
+                    except Exception:
+                        cur = 1
+                    return load_edit_row(df, cur + int(delta), name_col, text_col)
+
+                def on_preview_cell_select(df, name_col, text_col, evt: gr.SelectData):
+                    """点击表格单元格时，将该行载入大编辑框。"""
+                    if df is None or (hasattr(df, "empty") and df.empty):
+                        return 1, "", ""
+                    try:
+                        if isinstance(evt.index, (list, tuple)):
+                            row = int(evt.index[0])
+                        else:
+                            row = int(evt.index)
+                    except Exception:
+                        row = 0
+                    return load_edit_row(df, row + 1, name_col, text_col)
 
                 # 批量修改状态的函数
                 def set_all_status(df, status):
@@ -2297,6 +2421,33 @@ with gr.Blocks(title="GPT-SoVITS WebUI", css=_BATCH_UI_CSS) as app:
 
                 batch_file.change(handle_file_upload, [batch_file], [batch_preview, batch_sheet, batch_name_col, batch_text_col, batch_output_dir, batch_status])
                 batch_sheet.change(handle_sheet_change, [batch_file, batch_sheet], [batch_preview, batch_name_col, batch_text_col, batch_output_dir, batch_status])
+
+                # 单行大框编辑：读取 / 写回 / 上下行 / 点击表格载入
+                btn_load_edit_row.click(
+                    load_edit_row,
+                    [batch_preview, edit_row_idx, batch_name_col, batch_text_col],
+                    [edit_row_idx, edit_filename, edit_text],
+                )
+                btn_apply_edit_row.click(
+                    apply_edit_row,
+                    [batch_preview, edit_row_idx, edit_filename, edit_text, batch_name_col, batch_text_col],
+                    [batch_preview, batch_status],
+                )
+                btn_prev_edit_row.click(
+                    lambda df, row, nc, tc: shift_edit_row(df, row, nc, tc, -1),
+                    [batch_preview, edit_row_idx, batch_name_col, batch_text_col],
+                    [edit_row_idx, edit_filename, edit_text],
+                )
+                btn_next_edit_row.click(
+                    lambda df, row, nc, tc: shift_edit_row(df, row, nc, tc, 1),
+                    [batch_preview, edit_row_idx, batch_name_col, batch_text_col],
+                    [edit_row_idx, edit_filename, edit_text],
+                )
+                batch_preview.select(
+                    on_preview_cell_select,
+                    [batch_preview, batch_name_col, batch_text_col],
+                    [edit_row_idx, edit_filename, edit_text],
+                )
 
                 batch_btn.click(
                     batch_generation,
