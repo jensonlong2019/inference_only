@@ -1797,15 +1797,167 @@ _BATCH_UI_CSS = """
 #batch_results_df {
     overscroll-behavior: contain;
 }
-/* 大编辑区：更舒适地改长文案 */
-#batch_cell_editor textarea {
-    min-height: 140px !important;
-    line-height: 1.5 !important;
-    font-size: 14px !important;
+/* 序号 / 类型 / 命名 收窄，把横向空间留给配音内容 */
+#batch_preview_df th.batch-narrow-col,
+#batch_preview_df td.batch-narrow-col {
+    width: 88px !important;
+    min-width: 72px !important;
+    max-width: 110px !important;
+    overflow: hidden;
+    white-space: nowrap !important;
+}
+#batch_preview_df th.batch-name-col,
+#batch_preview_df td.batch-name-col {
+    width: 128px !important;
+    min-width: 100px !important;
+    max-width: 150px !important;
+    overflow: hidden;
+    white-space: nowrap !important;
+}
+/* 配音内容列：外观接近多行文本框，占剩余大部分宽度 */
+#batch_preview_df th.batch-text-cell,
+#batch_preview_df td.batch-text-cell {
+    min-width: 360px !important;
+    width: 62% !important;
+}
+#batch_preview_df td.batch-text-cell .cell-wrap {
+    display: block;
+    width: 100%;
+}
+#batch_preview_df td.batch-text-cell span:not(.edit) {
+    display: block;
+    min-height: 88px;
+    padding: 8px 10px !important;
+    border: 1px solid var(--input-border-color, #c5c5d2);
+    border-radius: 6px;
+    background: var(--input-background-fill, #fff);
+    line-height: 1.5;
+    white-space: pre-wrap !important;
+    word-break: break-word !important;
+}
+#batch_preview_df textarea.batch-cell-textarea {
+    display: block;
+    width: 100%;
+    min-height: 140px;
+    max-height: 360px;
+    padding: 8px 10px;
+    margin: 0;
+    box-sizing: border-box;
+    resize: vertical;
+    line-height: 1.5;
+    font-size: 14px;
+    font-family: inherit;
+    color: inherit;
+    white-space: pre-wrap;
+    word-break: break-word;
+    border: 1px solid var(--color-accent, #2563eb);
+    border-radius: 6px;
+    background: var(--input-background-fill, #fff);
+    outline: none;
 }
 """
 
-with gr.Blocks(title="GPT-SoVITS WebUI", css=_BATCH_UI_CSS) as app:
+_BATCH_UI_HEAD = """
+<script>
+(function () {
+  function headerText(el) {
+    return String(el && el.textContent || "").replace(/\\s+/g, "");
+  }
+  function isTextHeader(text) {
+    var t = headerText({ textContent: text });
+    return t.indexOf("配音内容") !== -1 || t.indexOf("文本内容") !== -1 || t.indexOf("合成内容") !== -1;
+  }
+  function colClassForHeader(text) {
+    var t = headerText({ textContent: text });
+    if (isTextHeader(t)) return "batch-text-cell";
+    if (t.indexOf("命名") !== -1 || t.indexOf("文件名") !== -1) return "batch-name-col";
+    if (t.indexOf("序号") !== -1 || t.indexOf("类型") !== -1) return "batch-narrow-col";
+    return "";
+  }
+  function markTextCells(root) {
+    var ths = Array.prototype.slice.call(root.querySelectorAll("thead th"));
+    if (!ths.length) ths = Array.prototype.slice.call(root.querySelectorAll("table tr:first-child th"));
+    var classes = ths.map(function (th) { return colClassForHeader(th.textContent); });
+    var hasText = classes.some(function (c) { return c === "batch-text-cell"; });
+    if (!hasText && ths.length > 1) classes[ths.length - 1] = "batch-text-cell";
+    ths.forEach(function (th, i) {
+      if (classes[i]) th.classList.add(classes[i]);
+    });
+    Array.prototype.forEach.call(root.querySelectorAll("tbody tr"), function (tr) {
+      classes.forEach(function (cls, i) {
+        if (cls && tr.children[i]) tr.children[i].classList.add(cls);
+      });
+    });
+  }
+  function upgradeTextarea(input) {
+    if (!input || input.dataset.batchTa === "1") return;
+    var td = input.closest("td");
+    if (!td || !td.classList.contains("batch-text-cell")) return;
+    input.dataset.batchTa = "1";
+    var wrap = input.parentNode;
+    var ta = wrap.querySelector("textarea.batch-cell-textarea");
+    if (!ta) {
+      ta = document.createElement("textarea");
+      ta.className = "batch-cell-textarea";
+      ta.rows = 6;
+      wrap.insertBefore(ta, input);
+    }
+    var span = wrap.querySelector("span");
+    var recovered = input.value;
+    if (!recovered && span && span.textContent) recovered = span.textContent;
+    ta.value = recovered || "";
+    if (input.value !== ta.value) {
+      input.value = ta.value;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    input.setAttribute("tabindex", "-1");
+    input.style.cssText = "position:absolute;left:0;top:0;width:1px;height:1px;opacity:0;pointer-events:none;";
+    if (!ta.dataset.bound) {
+      ta.dataset.bound = "1";
+      ta.addEventListener("input", function () {
+        input.value = ta.value;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      ta.addEventListener("blur", function () {
+        input.value = ta.value;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        input.dispatchEvent(new Event("blur", { bubbles: true }));
+      });
+      ta.addEventListener("keydown", function (e) {
+        e.stopPropagation();
+      });
+    }
+    setTimeout(function () { ta.focus(); }, 0);
+  }
+  function scan(root) {
+    if (!root) return;
+    markTextCells(root);
+    Array.prototype.forEach.call(root.querySelectorAll("td.batch-text-cell input:not([type=checkbox])"), upgradeTextarea);
+  }
+  function boot() {
+    var obs = new MutationObserver(function () {
+      var root = document.getElementById("batch_preview_df");
+      if (root) scan(root);
+    });
+    obs.observe(document.body, { childList: true, subtree: true });
+    document.addEventListener("keydown", function (e) {
+      if (e.key.length !== 1 || e.ctrlKey || e.metaKey || e.altKey) return;
+      var td = e.target && e.target.closest ? e.target.closest("#batch_preview_df td.batch-text-cell") : null;
+      if (!td) return;
+      if (e.target.tagName === "TEXTAREA") return;
+      e.stopPropagation();
+    }, true);
+    var root = document.getElementById("batch_preview_df");
+    if (root) scan(root);
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
+  else boot();
+})();
+</script>
+"""
+
+with gr.Blocks(title="GPT-SoVITS WebUI", css=_BATCH_UI_CSS, head=_BATCH_UI_HEAD) as app:
     gr.Markdown(
         value=i18n("本软件以MIT协议开源, 作者不对软件具备任何控制力, 使用软件者、传播软件导出的声音者自负全责. <br>如不认可该条款, 则不能使用或引用软件包内任何代码和文件. 详见根目录<b>LICENSE</b>.")
     )
@@ -1998,45 +2150,17 @@ with gr.Blocks(title="GPT-SoVITS WebUI", css=_BATCH_UI_CSS) as app:
                 DEFAULT_DATATYPE = ["bool"] + ["str"] * 100
                 
                 batch_preview = gr.DataFrame(
-                    label="完整数据预览与编辑（长文案建议用下方大框修改，可避免表格内联编辑被双击清空）", 
+                    label="完整数据预览与编辑（双击「配音内容」单元格可用多行输入框修改）", 
                     value=[[True, "示例文件名", "示例内容"]], 
                     headers=["是否处理", "文件名", "文本内容"], 
                     interactive=True,
                     type="pandas",
                     wrap=True,
-                    height=420,
+                    height=520,
                     elem_id="batch_preview_df",
-                    column_widths=["90px", "180px", "60%"],
                     # col_count=(3, "dynamic"), 
                     datatype=DEFAULT_DATATYPE 
                 )
-
-                # 大框编辑区：支持分行显示/编辑长文案，降低表格单元格内联编辑误清空风险
-                with gr.Group(elem_id="batch_cell_editor"):
-                    gr.Markdown(
-                        "### 单行大框编辑（推荐改文案用这里）  \n"
-                        "在上方表格点击某一单元格，或填写行号后点「读取该行」；在多行输入框中修改，再点「写回表格」。"
-                    )
-                    with gr.Row():
-                        edit_row_idx = gr.Number(
-                            label="行号（从 1 开始）",
-                            value=1,
-                            precision=0,
-                            minimum=1,
-                            scale=1,
-                        )
-                        edit_filename = gr.Textbox(label="文件名", lines=1, max_lines=2, scale=2)
-                    edit_text = gr.Textbox(
-                        label="文本内容（支持多行）",
-                        lines=6,
-                        max_lines=20,
-                        elem_id="batch_edit_text",
-                    )
-                    with gr.Row():
-                        btn_load_edit_row = gr.Button("读取该行", variant="secondary", scale=1)
-                        btn_apply_edit_row = gr.Button("写回表格", variant="primary", scale=1)
-                        btn_prev_edit_row = gr.Button("上一行", variant="secondary", scale=1)
-                        btn_next_edit_row = gr.Button("下一行", variant="secondary", scale=1)
 
                 def _to_process_bool(val):
                     """将「是否处理」统一为 bool，避免字符串 f/t 编辑引发表格跳动。"""
@@ -2046,80 +2170,6 @@ with gr.Blocks(title="GPT-SoVITS WebUI", css=_BATCH_UI_CSS) as app:
                         return False
                     s = str(val).strip().lower()
                     return s in ("true", "1", "yes", "是", "on", "t")
-
-                def _safe_row_index(df, row_num):
-                    """1-based 行号转 0-based 下标，并夹在合法范围内。"""
-                    if df is None or (hasattr(df, "empty") and df.empty):
-                        return None
-                    try:
-                        n = int(float(row_num))
-                    except Exception:
-                        n = 1
-                    if n < 1:
-                        n = 1
-                    if n > len(df):
-                        n = len(df)
-                    return n - 1
-
-                def _pick_name_text_cols(df, name_col, text_col):
-                    cols = list(df.columns) if df is not None else []
-                    nc = name_col if name_col in cols else (cols[1] if len(cols) > 1 else None)
-                    tc = text_col if text_col in cols else (cols[2] if len(cols) > 2 else (cols[1] if len(cols) > 1 else None))
-                    return nc, tc
-
-                def load_edit_row(df, row_num, name_col, text_col):
-                    if df is None or (hasattr(df, "empty") and df.empty):
-                        return 1, "", "当前表格为空，请先上传 Excel"
-                    idx = _safe_row_index(df, row_num)
-                    if idx is None:
-                        return 1, "", "当前表格为空，请先上传 Excel"
-                    nc, tc = _pick_name_text_cols(df, name_col, text_col)
-                    filename = "" if nc is None else str(df.iloc[idx][nc] if nc in df.columns else "")
-                    text = "" if tc is None else str(df.iloc[idx][tc] if tc in df.columns else "")
-                    if filename.lower() == "nan":
-                        filename = ""
-                    if text.lower() == "nan":
-                        text = ""
-                    return idx + 1, filename, text
-
-                def apply_edit_row(df, row_num, filename, text, name_col, text_col):
-                    if df is None or (hasattr(df, "empty") and df.empty):
-                        return gr.update(), "当前表格为空，无法写回"
-                    idx = _safe_row_index(df, row_num)
-                    if idx is None:
-                        return gr.update(), "当前表格为空，无法写回"
-                    nc, tc = _pick_name_text_cols(df, name_col, text_col)
-                    if nc is None and tc is None:
-                        return gr.update(), "找不到文件名/文本列，请先选择对应列"
-                    out = df.copy()
-                    # 用位置赋值，兼容非连续 index
-                    if nc is not None and nc in out.columns:
-                        out.iat[idx, out.columns.get_loc(nc)] = "" if filename is None else str(filename)
-                    if tc is not None and tc in out.columns:
-                        out.iat[idx, out.columns.get_loc(tc)] = "" if text is None else str(text)
-                    return gr.update(value=out), f"已写回第 {idx + 1} 行（可继续改下一行）"
-
-                def shift_edit_row(df, row_num, name_col, text_col, delta):
-                    if df is None or (hasattr(df, "empty") and df.empty):
-                        return 1, "", ""
-                    try:
-                        cur = int(float(row_num))
-                    except Exception:
-                        cur = 1
-                    return load_edit_row(df, cur + int(delta), name_col, text_col)
-
-                def on_preview_cell_select(df, name_col, text_col, evt: gr.SelectData):
-                    """点击表格单元格时，将该行载入大编辑框。"""
-                    if df is None or (hasattr(df, "empty") and df.empty):
-                        return 1, "", ""
-                    try:
-                        if isinstance(evt.index, (list, tuple)):
-                            row = int(evt.index[0])
-                        else:
-                            row = int(evt.index)
-                    except Exception:
-                        row = 0
-                    return load_edit_row(df, row + 1, name_col, text_col)
 
                 # 批量修改状态的函数
                 def set_all_status(df, status):
@@ -2425,33 +2475,6 @@ with gr.Blocks(title="GPT-SoVITS WebUI", css=_BATCH_UI_CSS) as app:
 
                 batch_file.change(handle_file_upload, [batch_file], [batch_preview, batch_sheet, batch_name_col, batch_text_col, batch_output_dir, batch_status])
                 batch_sheet.change(handle_sheet_change, [batch_file, batch_sheet], [batch_preview, batch_name_col, batch_text_col, batch_output_dir, batch_status])
-
-                # 单行大框编辑：读取 / 写回 / 上下行 / 点击表格载入
-                btn_load_edit_row.click(
-                    load_edit_row,
-                    [batch_preview, edit_row_idx, batch_name_col, batch_text_col],
-                    [edit_row_idx, edit_filename, edit_text],
-                )
-                btn_apply_edit_row.click(
-                    apply_edit_row,
-                    [batch_preview, edit_row_idx, edit_filename, edit_text, batch_name_col, batch_text_col],
-                    [batch_preview, batch_status],
-                )
-                btn_prev_edit_row.click(
-                    lambda df, row, nc, tc: shift_edit_row(df, row, nc, tc, -1),
-                    [batch_preview, edit_row_idx, batch_name_col, batch_text_col],
-                    [edit_row_idx, edit_filename, edit_text],
-                )
-                btn_next_edit_row.click(
-                    lambda df, row, nc, tc: shift_edit_row(df, row, nc, tc, 1),
-                    [batch_preview, edit_row_idx, batch_name_col, batch_text_col],
-                    [edit_row_idx, edit_filename, edit_text],
-                )
-                batch_preview.select(
-                    on_preview_cell_select,
-                    [batch_preview, batch_name_col, batch_text_col],
-                    [edit_row_idx, edit_filename, edit_text],
-                )
 
                 batch_btn.click(
                     batch_generation,
