@@ -1731,13 +1731,19 @@ _BATCH_UI_CSS = """
 #batch_results_df {
     margin-bottom: 72px;
 }
-#batch_preview_df .table-wrap,
+#batch_preview_df {
+    overflow: visible !important;
+    overscroll-behavior: contain;
+}
+/* 只让表格内部（VirtualTable）滚动，外层容器不再出现第二条滚动条 */
 #batch_preview_df .overflow-y-auto,
 #batch_preview_df .svelte-1ipelgc {
-    max-height: 420px !important;
-    overflow: auto !important;
-    overflow-anchor: none;
-    overscroll-behavior: contain;
+    max-height: none !important;
+    overflow: visible !important;
+}
+#batch_preview_df .table-wrap {
+    max-height: none !important;
+    overflow: hidden !important;
 }
 /* 生成结果表格：不限高、不滚动，按内容自动撑开 */
 #batch_results_df .table-wrap,
@@ -1792,8 +1798,6 @@ _BATCH_UI_CSS = """
 #batch_results_df input {
     min-height: 28px;
 }
-/* 表格滚动时不把滚轮链式传递给页面，其它板块不跟着滑 */
-#batch_preview_df,
 #batch_results_df {
     overscroll-behavior: contain;
 }
@@ -1823,11 +1827,15 @@ _BATCH_UI_CSS = """
 #batch_preview_df td.batch-text-cell .cell-wrap {
     display: block;
     width: 100%;
+    position: relative;
+}
+#batch_preview_df td.batch-text-cell span.edit {
+    display: none !important;
 }
 #batch_preview_df td.batch-text-cell span:not(.edit) {
     display: block;
-    min-height: 88px;
-    padding: 8px 10px !important;
+    min-height: 0;
+    padding: 6px 8px !important;
     border: 1px solid var(--input-border-color, #c5c5d2);
     border-radius: 6px;
     background: var(--input-background-fill, #fff);
@@ -1838,12 +1846,14 @@ _BATCH_UI_CSS = """
 #batch_preview_df textarea.batch-cell-textarea {
     display: block;
     width: 100%;
-    min-height: 140px;
-    max-height: 360px;
-    padding: 8px 10px;
+    min-height: 36px;
+    max-height: none;
+    height: auto;
+    padding: 6px 8px;
     margin: 0;
     box-sizing: border-box;
-    resize: vertical;
+    resize: none;
+    overflow: hidden;
     line-height: 1.5;
     font-size: 14px;
     font-family: inherit;
@@ -1889,6 +1899,14 @@ _BATCH_UI_HEAD = """
       });
     });
   }
+  function fitTextarea(ta) {
+    if (!ta) return;
+    ta.style.height = "auto";
+    var next = ta.scrollHeight;
+    if (next < 36) next = 36;
+    ta.style.height = next + "px";
+    ta.style.overflow = "hidden";
+  }
   function upgradeTextarea(input) {
     if (!input || input.dataset.batchTa === "1") return;
     var td = input.closest("td");
@@ -1899,7 +1917,7 @@ _BATCH_UI_HEAD = """
     if (!ta) {
       ta = document.createElement("textarea");
       ta.className = "batch-cell-textarea";
-      ta.rows = 6;
+      ta.rows = 1;
       wrap.insertBefore(ta, input);
     }
     var span = wrap.querySelector("span");
@@ -1917,6 +1935,7 @@ _BATCH_UI_HEAD = """
       ta.addEventListener("input", function () {
         input.value = ta.value;
         input.dispatchEvent(new Event("input", { bubbles: true }));
+        fitTextarea(ta);
       });
       ta.addEventListener("blur", function () {
         input.value = ta.value;
@@ -1928,7 +1947,10 @@ _BATCH_UI_HEAD = """
         e.stopPropagation();
       });
     }
-    setTimeout(function () { ta.focus(); }, 0);
+    setTimeout(function () {
+      fitTextarea(ta);
+      ta.focus();
+    }, 0);
   }
   function scan(root) {
     if (!root) return;
