@@ -1426,6 +1426,14 @@ def single_inference_output(
         print(f"单条生成保存 MP3 失败: {e}，回退为 WAV 数据")
         return (sample_rate, audio_data)
 
+def _results_sync_payload(action, row=None, rows=None):
+    payload = {"action": action}
+    if row is not None:
+        payload["row"] = row
+    if rows is not None:
+        payload["rows"] = rows
+    return json.dumps(payload, ensure_ascii=False)
+
 def batch_generation(file, name_column, text_column, data_frame, ref_wav_path, prompt_text, prompt_language, text_language, how_to_cut, top_k, top_p, temperature, ref_free, speed, if_freeze, inp_refs, volume, output_dir, output_format):
     global stop_batch, pause_batch, cache, _ref_audio_cache
     stop_batch = False
@@ -1435,7 +1443,7 @@ def batch_generation(file, name_column, text_column, data_frame, ref_wav_path, p
     # 但为了性能，我们只在参考音频变化时才重新计算
     
     if file is None and (data_frame is None or len(data_frame) == 0):
-        yield "请上传Excel文件"
+        yield "请上传Excel文件", gr.update(), []
         return
 
     # 直接使用用户在DataFrame组件中编辑过的数据
@@ -1445,14 +1453,14 @@ def batch_generation(file, name_column, text_column, data_frame, ref_wav_path, p
         else:
              df = pd.DataFrame(data_frame)
     except Exception as e:
-        yield f"数据格式转换失败: {str(e)}"
+        yield f"数据格式转换失败: {str(e)}", gr.update(), []
         return
     
     if name_column not in df.columns:
-        yield f"在表格中找不到文件名列: {name_column}"
+        yield f"在表格中找不到文件名列: {name_column}", gr.update(), []
         return
     if text_column not in df.columns:
-        yield f"在表格中找不到内容列: {text_column}"
+        yield f"在表格中找不到内容列: {text_column}", gr.update(), []
         return
 
     # 使用用户指定的输出目录，如果未指定则使用默认
@@ -1464,8 +1472,8 @@ def batch_generation(file, name_column, text_column, data_frame, ref_wav_path, p
     os.makedirs(abs_output_dir, exist_ok=True)
 
     total = len(df)
-    results_list = [] # 用于存储生成结果
-    yield f"准备开始... 结果将保存在: {abs_output_dir}", {"value": [], "__type__": "update"}
+    results_list = []  # [{filename, text, audio_url}, ...]
+    yield f"准备开始... 结果将保存在: {abs_output_dir}", _results_sync_payload("reset"), results_list
     print(f"Batch output directory: {abs_output_dir}")
     
     # 尝试清理显存
@@ -1488,15 +1496,15 @@ def batch_generation(file, name_column, text_column, data_frame, ref_wav_path, p
         
         # 检查是否停止
         if stop_batch:
-            yield f"任务已终止。已处理 {index} / {total} 条。", {"value": list(results_list), "__type__": "update"}
+            yield f"任务已终止。已处理 {index} / {total} 条。", gr.update(), results_list
             return
 
         # 检查是否暂停
         while pause_batch:
-            yield f"任务已暂停... 已处理 {index} / {total} 条。点击【继续】按钮继续。", {"value": list(results_list), "__type__": "update"}
+            yield f"任务已暂停... 已处理 {index} / {total} 条。点击【继续】按钮继续。", gr.update(), results_list
             time.sleep(1)
             if stop_batch:
-                yield f"任务已终止。已处理 {index} / {total} 条。", {"value": list(results_list), "__type__": "update"}
+                yield f"任务已终止。已处理 {index} / {total} 条。", gr.update(), results_list
                 return
         
         # 检查"是否处理"列 (如果存在)
@@ -1513,7 +1521,7 @@ def batch_generation(file, name_column, text_column, data_frame, ref_wav_path, p
                 is_process = val_str in ["true", "1", "yes", "是", "on", "t"]
         
         if not is_process:
-            yield f"跳过第 {index+1}/{total} 条 (未勾选)...", {"value": list(results_list), "__type__": "update"}
+            yield f"跳过第 {index+1}/{total} 条 (未勾选)...", gr.update(), results_list
             continue
 
         # 获取文件名和文本
@@ -1525,14 +1533,14 @@ def batch_generation(file, name_column, text_column, data_frame, ref_wav_path, p
 
         # 判空逻辑：如果文件名或内容为空，则跳过
         if not filename_str or filename_str.lower() == "nan" or filename_str == "":
-            yield f"跳过第 {index+1}/{total} 条 (文件名为空)...", {"value": list(results_list), "__type__": "update"}
+            yield f"跳过第 {index+1}/{total} 条 (文件名为空)...", gr.update(), results_list
             continue
 
         if not text or text.lower() == "nan" or text == "":
-            yield f"跳过第 {index+1}/{total} 条 (合成内容为空)...", {"value": list(results_list), "__type__": "update"}
+            yield f"跳过第 {index+1}/{total} 条 (合成内容为空)...", gr.update(), results_list
             continue
             
-        yield f"正在处理第 {index+1}/{total} 条: [{filename_str}]...", {"value": list(results_list), "__type__": "update"}
+        yield f"正在处理第 {index+1}/{total} 条: [{filename_str}]...", gr.update(), results_list
         
         try:
             with torch.no_grad():
@@ -1565,29 +1573,24 @@ def batch_generation(file, name_column, text_column, data_frame, ref_wav_path, p
                 # 增加时间戳防止浏览器音频缓存导致预览不更新
                 timestamp = int(time.time())
                 audio_url = f"/file={final_path}?t={timestamp}"
-                # 使用 HTML audio 标签
-                audio_html = f'<audio controls src="{audio_url}"></audio>'
-                
-                # 第一列：待重生成勾选（默认不勾选）
-                results_list.append([False, filename_str, text, audio_html])
-                # 立即更新结果，确保即使只有一条数据也能看到
-                yield f"已处理 {index+1}/{total} 条: [{filename_str}]", {"value": list(results_list), "__type__": "update"}
+                item = {"filename": filename_str, "text": text, "audio_url": audio_url}
+                results_list.append(item)
+                # 只追加这一行，不整表回传，避免已生成音频被刷新
+                yield f"已处理 {index+1}/{total} 条: [{filename_str}]", _results_sync_payload("append", row=item), results_list
 
             else:
                 print(f"第 {index+1} 条生成结果为空")
-                # 即使生成失败，也要更新一次结果，确保界面刷新
-                yield f"第 {index+1} 条生成结果为空", {"value": list(results_list), "__type__": "update"}
+                yield f"第 {index+1} 条生成结果为空", gr.update(), results_list
 
         except Exception as e:
             err_msg = f"处理第 {index+1} 条失败: {str(e)}"
             print(err_msg)
             import traceback
             traceback.print_exc()
-            yield err_msg, {"value": list(results_list), "__type__": "update"}
+            yield err_msg, gr.update(), results_list
             continue
             
-    # 最终更新：确保所有数据都处理完成后，最后一次更新结果预览
-    yield f"处理完成！文件已保存至: {abs_output_dir}", {"value": list(results_list), "__type__": "update"}
+    yield f"处理完成！文件已保存至: {abs_output_dir}", gr.update(), results_list
 
 def stop_batch_task():
     global stop_batch
@@ -1728,8 +1731,96 @@ _BATCH_UI_CSS = """
     box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.08);
 }
 /* 避免底部固定栏遮挡结果表格与操作区 */
-#batch_results_df {
+#batch_results_html {
     margin-bottom: 72px;
+    overflow: visible !important;
+}
+#batch_results_html table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+    background: var(--background-fill-primary, #fff);
+}
+#batch_results_html th,
+#batch_results_html td {
+    border: 1px solid var(--border-color-primary, #e5e5e5);
+    padding: 8px 10px;
+    vertical-align: top;
+    word-break: break-word;
+}
+#batch_results_html th:nth-child(1),
+#batch_results_html td:nth-child(1) {
+    width: 90px;
+    text-align: center;
+}
+#batch_results_html th:nth-child(2),
+#batch_results_html td:nth-child(2) {
+    width: 160px;
+}
+#batch_results_html th:nth-child(4),
+#batch_results_html td:nth-child(4) {
+    width: 240px;
+}
+#batch_results_html audio {
+    width: 100%;
+}
+#batch_results_wrap,
+#batch_results_html,
+#batch_results_html * {
+    pointer-events: auto !important;
+}
+#batch_results_html td:first-child {
+    cursor: pointer;
+}
+#batch_results_html .regen-lab,
+#batch_preview_df .regen-lab {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    cursor: pointer;
+}
+#batch_results_html .regen-check,
+#batch_preview_df .batch-native-check,
+#batch_preview_df td.batch-check-col input[type=checkbox] {
+    -webkit-appearance: checkbox !important;
+    appearance: auto !important;
+    width: 18px !important;
+    height: 18px !important;
+    min-width: 18px !important;
+    min-height: 18px !important;
+    margin: 0 !important;
+    opacity: 1 !important;
+    visibility: visible !important;
+    position: relative !important;
+    z-index: 6 !important;
+    pointer-events: auto !important;
+    cursor: pointer !important;
+    border: 1px solid #666 !important;
+    border-width: 1px !important;
+    background-color: #fff !important;
+    accent-color: #ea580c;
+}
+#batch_preview_df td.batch-check-col {
+    text-align: center !important;
+    vertical-align: middle !important;
+    cursor: pointer;
+}
+#batch_preview_df td.batch-check-col span {
+    position: absolute !important;
+    width: 1px !important;
+    height: 1px !important;
+    overflow: hidden !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+}
+#batch_preview_df td.batch-check-col input:not([type=checkbox]) {
+    position: absolute !important;
+    width: 1px !important;
+    height: 1px !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
 }
 #batch_preview_df {
     overflow: visible !important;
@@ -1745,13 +1836,9 @@ _BATCH_UI_CSS = """
     max-height: none !important;
     overflow: hidden !important;
 }
-/* 生成结果表格：不限高、不滚动，按内容自动撑开 */
-#batch_results_df .table-wrap,
-#batch_results_df .overflow-y-auto,
-#batch_results_df .svelte-1ipelgc {
-    max-height: none !important;
-    overflow: visible !important;
-    overscroll-behavior: auto;
+/* 生成结果：原生表格按内容撑开，无内部滚动 */
+#batch_results_df {
+    display: none;
 }
 #batch_preview_df table,
 #batch_results_df table {
@@ -1870,6 +1957,83 @@ _BATCH_UI_CSS = """
 _BATCH_UI_HEAD = """
 <script>
 (function () {
+  function applyBatchResults(payload) {
+    if (!payload) return;
+    var data = payload;
+    if (typeof payload === "string") {
+      try { data = JSON.parse(payload); } catch (e) { return; }
+    }
+    if (!data || !data.action) return;
+    var tbody = document.getElementById("batch_results_tbody");
+    if (!tbody) return;
+    function addRow(row) {
+      if (!row || !row.filename) return;
+      var existed = tbody.querySelector('tr[data-name="' + String(row.filename).replace(/"/g, "") + '"]');
+      if (existed) {
+        var audioOld = existed.querySelector("audio");
+        if (audioOld && row.audio_url) audioOld.src = row.audio_url;
+        return;
+      }
+      var tr = document.createElement("tr");
+      tr.setAttribute("data-name", row.filename);
+      var td0 = document.createElement("td");
+      var lab = document.createElement("label");
+      lab.className = "regen-lab";
+      var cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.className = "regen-check";
+      cb.setAttribute("data-name", row.filename);
+      lab.appendChild(cb);
+      td0.appendChild(lab);
+      td0.addEventListener("click", function (e) {
+        e.stopPropagation();
+        if (e.target === cb) return;
+        cb.checked = !cb.checked;
+      });
+      var td1 = document.createElement("td");
+      td1.textContent = row.filename || "";
+      var td2 = document.createElement("td");
+      td2.textContent = row.text || "";
+      var td3 = document.createElement("td");
+      var audio = document.createElement("audio");
+      audio.controls = true;
+      audio.preload = "metadata";
+      audio.src = row.audio_url || "";
+      td3.appendChild(audio);
+      tr.appendChild(td0);
+      tr.appendChild(td1);
+      tr.appendChild(td2);
+      tr.appendChild(td3);
+      tbody.appendChild(tr);
+    }
+    if (data.action === "reset") {
+      tbody.innerHTML = "";
+      return;
+    }
+    if (data.action === "append" && data.row) {
+      addRow(data.row);
+      return;
+    }
+    if (data.action === "replace") {
+      tbody.innerHTML = "";
+      (data.rows || []).forEach(addRow);
+    }
+  }
+  window.applyBatchResults = applyBatchResults;
+  function hookResultsSync() {
+    var box = document.querySelector("#batch_results_sync textarea") || document.querySelector("#batch_results_sync input");
+    if (!box || box.dataset.hooked === "1") return;
+    box.dataset.hooked = "1";
+    var last = "";
+    function drain() {
+      if (box.value !== last) {
+        last = box.value;
+        applyBatchResults(box.value);
+      }
+    }
+    box.addEventListener("input", drain);
+    box.addEventListener("change", drain);
+  }
   function headerText(el) {
     return String(el && el.textContent || "").replace(/\\s+/g, "");
   }
@@ -1879,6 +2043,7 @@ _BATCH_UI_HEAD = """
   }
   function colClassForHeader(text) {
     var t = headerText({ textContent: text });
+    if (t.indexOf("是否处理") !== -1) return "batch-check-col";
     if (isTextHeader(t)) return "batch-text-cell";
     if (t.indexOf("命名") !== -1 || t.indexOf("文件名") !== -1) return "batch-name-col";
     if (t.indexOf("序号") !== -1 || t.indexOf("类型") !== -1) return "batch-narrow-col";
@@ -1888,6 +2053,7 @@ _BATCH_UI_HEAD = """
     var ths = Array.prototype.slice.call(root.querySelectorAll("thead th"));
     if (!ths.length) ths = Array.prototype.slice.call(root.querySelectorAll("table tr:first-child th"));
     var classes = ths.map(function (th) { return colClassForHeader(th.textContent); });
+    if ((!classes[0] || classes[0] === "") && ths.length) classes[0] = "batch-check-col";
     var hasText = classes.some(function (c) { return c === "batch-text-cell"; });
     if (!hasText && ths.length > 1) classes[ths.length - 1] = "batch-text-cell";
     ths.forEach(function (th, i) {
@@ -1896,6 +2062,72 @@ _BATCH_UI_HEAD = """
     Array.prototype.forEach.call(root.querySelectorAll("tbody tr"), function (tr) {
       classes.forEach(function (cls, i) {
         if (cls && tr.children[i]) tr.children[i].classList.add(cls);
+      });
+    });
+  }
+  function parseProcessChecked(val) {
+    var s = String(val == null ? "" : val).trim().toLowerCase();
+    return s === "true" || s === "1" || s === "t" || s === "yes" || s === "是" || s === "on";
+  }
+  function writeProcessCell(td, checked) {
+    var v = checked ? "true" : "false";
+    var wrap = td.querySelector(".cell-wrap") || td;
+    var span = wrap.querySelector("span");
+    var hidden = wrap.querySelector("input:not([type=checkbox])");
+    if (span) span.textContent = v;
+    if (hidden) {
+      hidden.value = v;
+      hidden.dispatchEvent(new Event("input", { bubbles: true }));
+      hidden.dispatchEvent(new Event("change", { bubbles: true }));
+      hidden.dispatchEvent(new Event("blur", { bubbles: true }));
+      return;
+    }
+    td.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    setTimeout(function () {
+      var inp = td.querySelector("input:not([type=checkbox])");
+      if (inp) {
+        inp.value = v;
+        inp.dispatchEvent(new Event("input", { bubbles: true }));
+        inp.dispatchEvent(new Event("blur", { bubbles: true }));
+      }
+    }, 0);
+  }
+  function upgradeProcessChecks(root) {
+    Array.prototype.forEach.call(root.querySelectorAll("td.batch-check-col"), function (td) {
+      var existed = td.querySelector(".batch-native-check");
+      if (existed) {
+        var span = td.querySelector("span");
+        if (span) {
+          var now = parseProcessChecked(span.textContent);
+          if (existed.checked !== now) existed.checked = now;
+        }
+        return;
+      }
+      var gcheck = td.querySelector("input[type=checkbox]");
+      if (gcheck) {
+        gcheck.classList.add("batch-native-check");
+        return;
+      }
+      var wrap = td.querySelector(".cell-wrap") || td;
+      var span = wrap.querySelector("span");
+      var hidden = wrap.querySelector("input:not([type=checkbox])");
+      var val = hidden ? hidden.value : (span ? span.textContent : "true");
+      var lab = document.createElement("label");
+      lab.className = "regen-lab";
+      var cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.className = "batch-native-check";
+      cb.checked = parseProcessChecked(val);
+      lab.appendChild(cb);
+      wrap.insertBefore(lab, wrap.firstChild);
+      cb.addEventListener("click", function (e) { e.stopPropagation(); });
+      cb.addEventListener("change", function () { writeProcessCell(td, cb.checked); });
+      td.addEventListener("click", function (e) {
+        if (e.target === cb) return;
+        e.preventDefault();
+        e.stopPropagation();
+        cb.checked = !cb.checked;
+        writeProcessCell(td, cb.checked);
       });
     });
   }
@@ -1955,12 +2187,14 @@ _BATCH_UI_HEAD = """
   function scan(root) {
     if (!root) return;
     markTextCells(root);
+    upgradeProcessChecks(root);
     Array.prototype.forEach.call(root.querySelectorAll("td.batch-text-cell input:not([type=checkbox])"), upgradeTextarea);
   }
   function boot() {
     var obs = new MutationObserver(function () {
-      var root = document.getElementById("batch_preview_df");
-      if (root) scan(root);
+      var preview = document.getElementById("batch_preview_df");
+      if (preview) scan(preview);
+      hookResultsSync();
     });
     obs.observe(document.body, { childList: true, subtree: true });
     document.addEventListener("keydown", function (e) {
@@ -1972,6 +2206,7 @@ _BATCH_UI_HEAD = """
     }, true);
     var root = document.getElementById("batch_preview_df");
     if (root) scan(root);
+    hookResultsSync();
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
   else boot();
@@ -2172,7 +2407,7 @@ with gr.Blocks(title="GPT-SoVITS WebUI", css=_BATCH_UI_CSS, head=_BATCH_UI_HEAD)
                 DEFAULT_DATATYPE = ["bool"] + ["str"] * 100
                 
                 batch_preview = gr.DataFrame(
-                    label="完整数据预览与编辑（双击「配音内容」单元格可用多行输入框修改）", 
+                    label="完整数据预览与编辑（第一列勾选控制是否生成；双击「配音内容」可用多行框修改）", 
                     value=[[True, "示例文件名", "示例内容"]], 
                     headers=["是否处理", "文件名", "文本内容"], 
                     interactive=True,
@@ -2345,19 +2580,24 @@ with gr.Blocks(title="GPT-SoVITS WebUI", css=_BATCH_UI_CSS, head=_BATCH_UI_HEAD)
                 # 绑定打开文件夹按钮
                 btn_open_folder.click(open_output_folder, [batch_output_dir], [batch_status])
                 
-                # 5. 生成结果展示
+                # 5. 生成结果展示（原生 HTML 表：勾选不回传、新结果只追加行）
                 with gr.Row():
                     gr.Markdown("### 5. 生成结果预览 (实时更新，点击音频即可播放)")
-                
-                batch_results_df = gr.DataFrame(
-                    label="生成结果",
-                    headers=["待重生成", "文件名", "文本内容", "音频预览"],
-                    datatype=["bool", "str", "str", "html"],
-                    interactive=True,
-                    wrap=True,
-                    elem_id="batch_results_df",
-                    column_widths=["100px", "160px", "35%", "30%"],
+
+                gr.HTML(
+                    value=(
+                        '<div id="batch_results_html">'
+                        '<table><thead><tr>'
+                        '<th>待重生成</th><th>文件名</th><th>文本内容</th><th>音频预览</th>'
+                        '</tr></thead>'
+                        '<tbody id="batch_results_tbody"></tbody>'
+                        '</table></div>'
+                    ),
+                    elem_id="batch_results_wrap",
                 )
+                batch_results_state = gr.State([])
+                results_sync = gr.Textbox(visible=False, elem_id="batch_results_sync")
+                regen_checked_json = gr.Textbox(value="[]", visible=False, elem_id="regen_checked_json")
                 
                 with gr.Row():
                     gr.Markdown(
@@ -2372,48 +2612,18 @@ with gr.Blocks(title="GPT-SoVITS WebUI", css=_BATCH_UI_CSS, head=_BATCH_UI_HEAD)
                     btn_regen_checked = gr.Button("批量重新生成勾选行", variant="primary", scale=2)
                     btn_clear_regen_marks = gr.Button("清除勾选", variant="secondary", scale=1)
 
-                def _batch_result_row_marked(val):
-                    """解析「待重生成」列是否为勾选。"""
-                    if isinstance(val, (bool, np.bool_)):
-                        return bool(val)
-                    if val is None:
-                        return False
-                    s = str(val).strip().lower()
-                    return s in ("true", "1", "yes", "是", "on", "t")
-
-                def _normalize_batch_results_df(df):
-                    """兼容旧版三列表格：自动插入「待重生成」列。"""
-                    if df is None or (hasattr(df, "empty") and df.empty):
-                        return df
+                def regenerate_checked_rows(results_state, checked_json, ref_wav_path, prompt_text, prompt_language, text_language, how_to_cut, top_k, top_p, temperature, ref_free, speed, if_freeze, inp_refs, volume, output_dir, output_format):
+                    rows = results_state or []
                     try:
-                        n = len(df.columns)
+                        names = json.loads(checked_json or "[]")
                     except Exception:
-                        return df
-                    if n == 3:
-                        out = df.copy()
-                        out.insert(0, "待重生成", False)
-                        return out
-                    return df
-
-                def clear_regen_checkboxes(df):
-                    df = _normalize_batch_results_df(df)
-                    if df is None or df.empty:
-                        return gr.update()
-                    df2 = df.copy()
-                    for i in range(len(df2)):
-                        df2.iloc[i, 0] = False
-                    return gr.update(value=df2)
-
-                def regenerate_checked_rows(df, ref_wav_path, prompt_text, prompt_language, text_language, how_to_cut, top_k, top_p, temperature, ref_free, speed, if_freeze, inp_refs, volume, output_dir, output_format):
-                    df = _normalize_batch_results_df(df)
-                    if df is None or df.empty:
-                        return "没有可重新生成的数据", {"value": df if df is not None else pd.DataFrame(), "__type__": "update"}
-                    if len(df.columns) < 4:
-                        return "结果表格式异常，请重新执行一次批量生成。", {"value": df, "__type__": "update"}
-
-                    marked_indices = [i for i in range(len(df)) if _batch_result_row_marked(df.iloc[i, 0])]
-                    if not marked_indices:
-                        return "请先在「待重生成」列勾选需要重做的行。", {"value": df, "__type__": "update"}
+                        names = []
+                    if not isinstance(names, list):
+                        names = []
+                    name_set = {str(n).strip() for n in names if str(n).strip()}
+                    selected = [r for r in rows if str(r.get("filename", "")).strip() in name_set]
+                    if not selected:
+                        return "请先在「待重生成」列勾选需要重做的行。", gr.update(), rows
 
                     global cache
                     if not output_dir or str(output_dir).strip() == "":
@@ -2421,17 +2631,16 @@ with gr.Blocks(title="GPT-SoVITS WebUI", css=_BATCH_UI_CSS, head=_BATCH_UI_HEAD)
                     abs_output_dir = os.path.abspath(output_dir)
                     os.makedirs(abs_output_dir, exist_ok=True)
 
-                    # 重新生成后仅保留本次成功重做的结果，未勾选/未重做的行不再展示
                     regenerated_rows = []
                     ok_names = []
                     err_msgs = []
 
-                    for idx in marked_indices:
+                    for item in selected:
                         cache = {}
-                        filename = str(df.iloc[idx, 1]).strip()
-                        text = str(df.iloc[idx, 2]).strip()
+                        filename = str(item.get("filename", "")).strip()
+                        text = str(item.get("text", "")).strip()
                         if not filename or not text:
-                            err_msgs.append(f"第 {idx + 1} 行: 文件名或文本为空，已跳过")
+                            err_msgs.append(f"{filename or '未知'}: 文件名或文本为空，已跳过")
                             continue
                         try:
                             safe_temp = min(float(temperature), 0.7)
@@ -2464,13 +2673,12 @@ with gr.Blocks(title="GPT-SoVITS WebUI", css=_BATCH_UI_CSS, head=_BATCH_UI_HEAD)
                                 final_path = save_audio_direct(sample_rate, audio_data, base_filename, output_format)
                                 timestamp = int(time.time())
                                 audio_url = f"/file={final_path}?t={timestamp}"
-                                audio_html = f'<audio controls src="{audio_url}"></audio>'
-                                regenerated_rows.append([False, filename, text, audio_html])
+                                regenerated_rows.append({"filename": filename, "text": text, "audio_url": audio_url})
                                 ok_names.append(filename)
                             else:
                                 err_msgs.append(f"{filename}: 生成结果为空")
                         except Exception as e:
-                            print(f"Regenerate error row {idx}: {e}")
+                            print(f"Regenerate error {filename}: {e}")
                             import traceback
                             traceback.print_exc()
                             err_msgs.append(f"{filename}: {str(e)}")
@@ -2482,17 +2690,34 @@ with gr.Blocks(title="GPT-SoVITS WebUI", css=_BATCH_UI_CSS, head=_BATCH_UI_HEAD)
                     if err_msgs:
                         parts.append("部分失败: " + "; ".join(err_msgs[:10]) + ("…" if len(err_msgs) > 10 else ""))
                     msg = " | ".join(parts) if parts else "未处理任何行"
-                    return msg, {"value": regenerated_rows, "__type__": "update"}
+                    return msg, _results_sync_payload("replace", rows=regenerated_rows), regenerated_rows
+
+                _collect_checked_js = """
+(state, checked, refw, ptext, plang, tlang, cut, tok, top, temp, rfree, spd, freeze, refs, vol, odir, ofmt) => {
+  const names = Array.from(document.querySelectorAll('#batch_results_tbody .regen-check:checked')).map(c => c.getAttribute('data-name') || '');
+  return [state, JSON.stringify(names), refw, ptext, plang, tlang, cut, tok, top, temp, rfree, spd, freeze, refs, vol, odir, ofmt];
+}
+"""
 
                 btn_regen_checked.click(
                     regenerate_checked_rows,
-                    [batch_results_df, inp_ref, prompt_text, prompt_language, text_language, how_to_cut, top_k, top_p, temperature, ref_text_free, speed, if_freeze, inp_refs, volume, batch_output_dir, batch_output_format],
-                    [batch_status, batch_results_df],
+                    [batch_results_state, regen_checked_json, inp_ref, prompt_text, prompt_language, text_language, how_to_cut, top_k, top_p, temperature, ref_text_free, speed, if_freeze, inp_refs, volume, batch_output_dir, batch_output_format],
+                    [batch_status, results_sync, batch_results_state],
+                    js=_collect_checked_js,
                 )
                 btn_clear_regen_marks.click(
-                    clear_regen_checkboxes,
-                    [batch_results_df],
-                    [batch_results_df],
+                    lambda: None,
+                    js="() => { document.querySelectorAll('#batch_results_tbody .regen-check').forEach(c => { c.checked = false; }); }",
+                )
+
+                def _apply_results_sync(payload):
+                    return None
+
+                results_sync.change(
+                    _apply_results_sync,
+                    [results_sync],
+                    [],
+                    js="(p) => { if (window.applyBatchResults) window.applyBatchResults(p); return p; }",
                 )
 
                 batch_file.change(handle_file_upload, [batch_file], [batch_preview, batch_sheet, batch_name_col, batch_text_col, batch_output_dir, batch_status])
@@ -2501,10 +2726,10 @@ with gr.Blocks(title="GPT-SoVITS WebUI", css=_BATCH_UI_CSS, head=_BATCH_UI_HEAD)
                 batch_btn.click(
                     batch_generation,
                     [batch_file, batch_name_col, batch_text_col, batch_preview, inp_ref, prompt_text, prompt_language, text_language, how_to_cut, top_k, top_p, temperature, ref_text_free, speed, if_freeze, inp_refs, volume, batch_output_dir, batch_output_format],
-                    [batch_status, batch_results_df] # 更新两个输出：状态文本和结果表格
+                    [batch_status, results_sync, batch_results_state],
                 )
-                batch_stop.click(stop_batch_task, [], [batch_status, batch_results_df], queue=False)
-                batch_pause.click(pause_resume_batch_task, [], [batch_status, batch_pause, batch_results_df], queue=False)
+                batch_stop.click(stop_batch_task, [], [batch_status], queue=False)
+                batch_pause.click(pause_resume_batch_task, [], [batch_status, batch_pause], queue=False)
 
         SoVITS_dropdown.change(change_sovits_weights, [SoVITS_dropdown,prompt_language,text_language], [prompt_language,text_language,prompt_text,prompt_language,text,text_language])
         GPT_dropdown.change(change_gpt_weights, [GPT_dropdown], [])
@@ -2512,6 +2737,7 @@ with gr.Blocks(title="GPT-SoVITS WebUI", css=_BATCH_UI_CSS, head=_BATCH_UI_HEAD)
 if __name__ == '__main__':
     # 自动查找可用端口（如果指定端口被占用，尝试下一个端口）
     import socket
+    import threading
     def find_free_port(start_port, max_attempts=10):
         """从 start_port 开始查找可用端口"""
         for i in range(max_attempts):
@@ -2550,23 +2776,34 @@ if __name__ == '__main__':
             pass
         return ips
 
-    # 监听所有网卡，方便同一局域网里的其他 Mac 访问（不要绑 127.0.0.1）
+    # 监听所有网卡，方便同一局域网里的其他 Mac 访问
     launch_server_name = "0.0.0.0"
-    launch_inbrowser = True
     launch_port = actual_port if actual_port else infer_ttswebui
     lan_ips = list_lan_ips()
-    print("WebUI 访问地址：")
-    print(f"  本机: http://127.0.0.1:{launch_port}")
+    local_url = f"http://127.0.0.1:{launch_port}"
+    print("========================================")
+    print("WebUI 已启动。请用下面的地址打开（不要用 0.0.0.0）：")
+    print(f"  本机浏览器: {local_url}")
     if lan_ips:
         for ip in lan_ips:
-            print(f"  其他电脑/Mac（同一局域网）: http://{ip}:{launch_port}")
+            print(f"  其他电脑/Mac: http://{ip}:{launch_port}")
     else:
-        print("  未自动识别局域网 IP，请在运行服务的电脑上看系统网络设置里的 IP。")
-    print("  若两台电脑不在同一网络，请使用启动后给出的 gradio.live 公网地址。")
+        print("  其他电脑：请用这台电脑的局域网 IP + 端口")
+    print("========================================")
+
+    def _open_local_browser():
+        try:
+            time.sleep(1.2)
+            import webbrowser
+            webbrowser.open(local_url)
+        except Exception as e:
+            print(f"自动打开浏览器失败，请手动访问 {local_url}: {e}")
+
+    threading.Thread(target=_open_local_browser, daemon=True).start()
 
     launch_kwargs = dict(
         server_name=launch_server_name,
-        inbrowser=launch_inbrowser,
+        inbrowser=False,  # 避免 Gradio 打开无法访问的 http://0.0.0.0
         share=is_share,
         server_port=launch_port,
         quiet=True,
