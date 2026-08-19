@@ -2507,17 +2507,46 @@ if __name__ == '__main__':
     actual_port = find_free_port(infer_ttswebui)
     if actual_port and actual_port != infer_ttswebui:
         print(f"端口 {infer_ttswebui} 被占用，自动切换到端口 {actual_port}")
-    
-    # Windows local package defaults to loopback to avoid proxy/localhost checks.
-    launch_server_name = "127.0.0.1" if os.name == "nt" and not is_share else "0.0.0.0"
-    # Windows package should also open browser automatically on startup.
+
+    def list_lan_ips():
+        ips = []
+        try:
+            for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+                ip = info[4][0]
+                if ip and not ip.startswith("127.") and ip not in ips:
+                    ips.append(ip)
+        except Exception:
+            pass
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            if ip and not ip.startswith("127.") and ip not in ips:
+                ips.insert(0, ip)
+        except Exception:
+            pass
+        return ips
+
+    # 监听所有网卡，方便同一局域网里的其他 Mac 访问（不要绑 127.0.0.1）
+    launch_server_name = "0.0.0.0"
     launch_inbrowser = True
+    launch_port = actual_port if actual_port else infer_ttswebui
+    lan_ips = list_lan_ips()
+    print("WebUI 访问地址：")
+    print(f"  本机: http://127.0.0.1:{launch_port}")
+    if lan_ips:
+        for ip in lan_ips:
+            print(f"  其他电脑/Mac（同一局域网）: http://{ip}:{launch_port}")
+    else:
+        print("  未自动识别局域网 IP，请在运行服务的电脑上看系统网络设置里的 IP。")
+    print("  若两台电脑不在同一网络，请使用启动后给出的 gradio.live 公网地址。")
 
     launch_kwargs = dict(
         server_name=launch_server_name,
         inbrowser=launch_inbrowser,
         share=is_share,
-        server_port=actual_port if actual_port else infer_ttswebui,
+        server_port=launch_port,
         quiet=True,
         allowed_paths=["output/batch_result", "."] # 允许访问当前目录及输出目录
     )
