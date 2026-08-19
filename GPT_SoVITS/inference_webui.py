@@ -1732,15 +1732,20 @@ _BATCH_UI_CSS = """
     margin-bottom: 72px;
 }
 #batch_preview_df .table-wrap,
-#batch_results_df .table-wrap,
 #batch_preview_df .overflow-y-auto,
-#batch_results_df .overflow-y-auto,
-#batch_preview_df .svelte-1ipelgc,
-#batch_results_df .svelte-1ipelgc {
+#batch_preview_df .svelte-1ipelgc {
     max-height: 420px !important;
     overflow: auto !important;
     overflow-anchor: none;
     overscroll-behavior: contain;
+}
+/* 生成结果表格：不限高、不滚动，按内容自动撑开 */
+#batch_results_df .table-wrap,
+#batch_results_df .overflow-y-auto,
+#batch_results_df .svelte-1ipelgc {
+    max-height: none !important;
+    overflow: visible !important;
+    overscroll-behavior: auto;
 }
 #batch_preview_df table,
 #batch_results_df table {
@@ -2278,7 +2283,6 @@ with gr.Blocks(title="GPT-SoVITS WebUI", css=_BATCH_UI_CSS) as app:
                     datatype=["bool", "str", "str", "html"],
                     interactive=True,
                     wrap=True,
-                    height=420,
                     elem_id="batch_results_df",
                     column_widths=["100px", "160px", "35%", "30%"],
                 )
