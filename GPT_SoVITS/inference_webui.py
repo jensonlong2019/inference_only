@@ -489,6 +489,57 @@ def load_letter_audio(letter, sample_rate):
             return None
     return None
 
+PH_MARKER = "【PH】"
+_ph_marker_audio_cache = {}
+
+def split_by_ph_marker(text):
+    """按【PH】标记拆分文本，返回 [('text', ...), ('ph', None), ...]"""
+    if PH_MARKER not in text:
+        return [("text", text)]
+    parts = re.split(r'(【PH】)', text)
+    segments = []
+    for part in parts:
+        if not part:
+            continue
+        if part == PH_MARKER:
+            segments.append(("ph", None))
+        else:
+            segments.append(("text", part))
+    return segments if segments else [("text", text)]
+
+def load_ph_marker_audio(sample_rate):
+    """加载【PH】标记对应的预制音频（ABCD/PH.wav 或 PH.mp3）"""
+    if sample_rate in _ph_marker_audio_cache:
+        return _ph_marker_audio_cache[sample_rate]
+    for fname in ("PH.wav", "PH.mp3"):
+        audio_path = os.path.join(ABCD_AUDIO_DIR, fname)
+        if os.path.exists(audio_path):
+            try:
+                audio_data = load_audio(audio_path, sample_rate)
+                _ph_marker_audio_cache[sample_rate] = audio_data
+                print(f"已加载【PH】标记音频: {audio_path}")
+                return audio_data
+            except Exception as e:
+                print(f"加载【PH】标记音频 {audio_path} 失败: {e}")
+    return None
+
+def append_prepared_audio(audio_opt, audio_data, sample_rate, volume, is_half, gap_sec=0.05):
+    """将预制音频追加到输出，并可选插入短静音"""
+    if audio_data is None:
+        return
+    audio = audio_data * volume if volume != 1.0 else audio_data
+    max_audio = np.abs(audio).max()
+    if max_audio > 1:
+        audio = audio / max_audio
+    audio_opt.append(audio)
+    if gap_sec > 0:
+        audio_opt.append(
+            np.zeros(
+                int(sample_rate * gap_sec),
+                dtype=np.float16 if is_half else np.float32,
+            )
+        )
+
 _caps_abbrev_re = re.compile(r'(?<![A-Za-z])([A-Z]{2,6})(?![A-Za-z])')
 
 def split_caps_abbrev(text):
@@ -941,180 +992,147 @@ def get_tts_wav(ref_wav_path, prompt_text, prompt_language, text, text_language,
              _ref_audio_cache["bert1"] = bert1
              _ref_audio_cache["norm_text1"] = norm_text1
 
-    for i_text,text in enumerate(texts):
+    for i_text, line_text in enumerate(texts):
         # 解决输入目标文本的空行导致报错的问题
-        if (len(text.strip()) == 0):
+        if len(line_text.strip()) == 0:
             continue
-        
-        # 【字母音频拼接功能】检测是否有字母前缀（如 "A."、"B." 等）
-        letter, remaining_text = extract_letter_prefix(text)
-        letter_audio = None
-        if letter:
-            # 尝试加载字母音频
-            letter_audio = load_letter_audio(letter, hps.data.sampling_rate)
-            if letter_audio is not None:
-                # 如果成功加载字母音频，使用后续文本进行生成
-                if remaining_text:
-                    # 有后续文本，使用后续文本
-                    text = remaining_text
-                    print(f"检测到字母前缀 {letter}，将使用字母音频 + 文本音频拼接")
+
+        sub_segments = split_by_ph_marker(line_text)
+        for sub_i, (seg_kind, seg_text) in enumerate(sub_segments):
+            if seg_kind == "ph":
+                ph_audio = load_ph_marker_audio(hps.data.sampling_rate)
+                if ph_audio is not None:
+                    append_prepared_audio(
+                        audio_opt, ph_audio, hps.data.sampling_rate, volume, is_half, gap_sec=0.05
+                    )
+                    print("检测到【PH】标记，已插入预制音频")
                 else:
-                    # 没有后续文本（只有字母前缀），只使用字母音频
-                    print(f"检测到字母前缀 {letter}，仅使用字母音频")
-                    audio_opt.append(letter_audio)
-                    if i_text < len(texts) - 1:
-                        shorter_zero_wav = np.zeros(
-                            int(hps.data.sampling_rate * 0.1),
-                            dtype=np.float16 if is_half == True else np.float32,
+                    print("警告: 未找到【PH】标记音频，请检查 ABCD/PH.mp3 或 PH.wav")
+                continue
+
+            text = seg_text
+            cache_key = f"{i_text}_{sub_i}" if len(sub_segments) > 1 else i_text
+            is_last_sub = sub_i == len(sub_segments) - 1
+            add_line_gap = is_last_sub and i_text < len(texts) - 1
+
+            # 【字母音频拼接功能】检测是否有字母前缀（如 "A."、"B." 等）
+            letter, remaining_text = extract_letter_prefix(text)
+            letter_audio = None
+            if letter:
+                letter_audio = load_letter_audio(letter, hps.data.sampling_rate)
+                if letter_audio is not None:
+                    if remaining_text:
+                        text = remaining_text
+                        print(f"检测到字母前缀 {letter}，将使用字母音频 + 文本音频拼接")
+                    else:
+                        print(f"检测到字母前缀 {letter}，仅使用字母音频")
+                        append_prepared_audio(
+                            audio_opt, letter_audio, hps.data.sampling_rate, volume, is_half, gap_sec=0.1 if add_line_gap else 0.05
                         )
-                        audio_opt.append(shorter_zero_wav)
-                    continue
-        
-        # 如果文本为空，跳过生成
-        if not text.strip():
-            continue
-        
-        # 【修复单个字符文本问题】对于单个字符的文本（特别是字母音频拼接后的），
-        # 不自动添加标点，避免影响发音和产生拉尾音
-        text_stripped = text.strip()
-        is_single_char = len(text_stripped) == 1
-        
-        # 优化：只在文本确实需要标点时才添加，避免不必要的标点导致语气词
-        # 如果文本已经被切分（不是最后一段），且末尾没有标点，才添加标点
-        # 这样可以减少因为自动添加标点导致的不自然停顿和语气词
-        # 但对于单个字符文本，跳过自动添加标点
-        if text_stripped and text_stripped[-1] not in splits and not is_single_char:
-            # 优化：只有在后面还有文字段落时才加标点
-            # 这样全文最后一段不会被强制补句号，从而减少结尾的幻听语气音
-            if i_text < len(texts) - 1:
-                text += "。" if text_language != "en" else "."
-        # print(i18n("实际输入的目标文本(每句):"), text)
-        
-        # 【修复单个字符文本的音素处理】对于单个字符文本，强制 final=True 避免自动添加点号
-        phones2,bert2,norm_text2=get_phones_and_bert(text, text_language, version, final=is_single_char)
-        # print(i18n("前端处理后的文本(每句):"), norm_text2)
-        if not ref_free:
-            bert = torch.cat([bert1, bert2], 1)
-            all_phoneme_ids = torch.LongTensor(phones1+phones2).to(device).unsqueeze(0)
-        else:
-            bert = bert2
-            all_phoneme_ids = torch.LongTensor(phones2).to(device).unsqueeze(0)
+                        continue
 
-        bert = bert.to(device).unsqueeze(0)
-        all_phoneme_len = torch.tensor([all_phoneme_ids.shape[-1]]).to(device)
+            if not text.strip():
+                continue
 
-        t2 = ttime()
-        # cache_key="%s-%s-%s-%s-%s-%s-%s-%s"%(ref_wav_path,prompt_text,prompt_language,text,text_language,top_k,top_p,temperature)
-        # print(cache.keys(),if_freeze)
-        
-        # 【修复单个字符文本拖音问题】对于单个字符文本，使用更严格的采样参数和更早的停止条件
-        # 单个字符文本容易受到参考音频影响，需要降低随机性和更早停止
-        if is_single_char:
-            # 降低 temperature 和 top_p，使生成更稳定、更短
-            single_char_temp = min(temperature, 0.5)
-            single_char_top_p = min(top_p, 0.7)
-            single_char_top_k = min(top_k, 15)
-            # 对于单个字符，限制最大生成长度，避免拖音
-            # 单个字符通常只需要很短的时间，设置更小的 early_stop_num
-            single_char_max_sec = min(max_sec, 2.0)  # 最多2秒
-            single_char_early_stop = hz * single_char_max_sec
-        else:
-            single_char_temp = temperature
-            single_char_top_p = top_p
-            single_char_top_k = top_k
-            single_char_early_stop = hz * max_sec
-        
-        if(i_text in cache and if_freeze==True):pred_semantic=cache[i_text]
-        else:
-            with torch.no_grad():
-                pred_semantic, idx = t2s_model.model.infer_panel(
-                    all_phoneme_ids,
-                    all_phoneme_len,
-                    None if ref_free else prompt,
-                    bert,
-                    # prompt_phone_len=ph_offset,
-                    top_k=single_char_top_k,
-                    top_p=single_char_top_p,
-                    temperature=single_char_temp,
-                    early_stop_num=single_char_early_stop,
-                )
-                pred_semantic = pred_semantic[:, -idx:].unsqueeze(0)
-                cache[i_text]=pred_semantic
-        t3 = ttime()
-        refers=[]
-        if(inp_refs):
-            for path in inp_refs:
-                try:
-                    refer = get_spepc(hps, path.name).to(dtype).to(device)
-                    refers.append(refer)
-                except:
-                    traceback.print_exc()
-        if(len(refers)==0):refers = [get_spepc(hps, ref_wav_path).to(dtype).to(device)]
-        audio = (vq_model.decode(pred_semantic, torch.LongTensor(phones2).to(device).unsqueeze(0), refers,speed=speed).detach().cpu().numpy()[0, 0])
-        max_audio=np.abs(audio).max()#简单防止16bit爆音
-        if max_audio>1:audio/=max_audio
-        
-        # 【修复单个字符文本拖音问题】对于单个字符文本，检测并截断拖尾
-        if is_single_char:
-            # 从后往前查找，找到最后一个能量较高的位置
-            # 单个字符通常很短，如果后面有很长的低能量拖尾，应该截断
-            sample_rate = hps.data.sampling_rate
-            # 计算音频的能量（使用滑动窗口）
-            window_size = int(sample_rate * 0.05)  # 50ms窗口
-            energy_threshold = 0.01  # 能量阈值
-            
-            # 计算每个窗口的能量
-            audio_len = len(audio)
-            if audio_len > window_size:
-                # 从后往前找，找到最后一个能量较高的位置
-                last_high_energy_idx = audio_len - 1
-                for i in range(audio_len - window_size, -1, -window_size):
-                    window = audio[max(0, i):min(i + window_size, audio_len)]
-                    window_energy = np.abs(window).max()
-                    if window_energy > energy_threshold:
-                        last_high_energy_idx = min(i + window_size * 2, audio_len)  # 多保留一点
-                        break
-                
-                # 如果检测到拖尾（最后的高能量位置距离结尾很远），截断
-                tail_length = audio_len - last_high_energy_idx
-                if tail_length > int(sample_rate * 0.3):  # 如果拖尾超过0.3秒
-                    audio = audio[:last_high_energy_idx]
-                    print(f"检测到单个字符文本拖尾，已截断 {tail_length/sample_rate:.2f} 秒")
-        
-        # 音量调整
-        if volume != 1.0:
-            audio = audio * volume
-            # 再次防止爆音
+            text_stripped = text.strip()
+            is_single_char = len(text_stripped) == 1
+
+            if text_stripped and text_stripped[-1] not in splits and not is_single_char:
+                if add_line_gap:
+                    text += "。" if text_language != "en" else "."
+
+            phones2,bert2,norm_text2=get_phones_and_bert(text, text_language, version, final=is_single_char)
+            if not ref_free:
+                bert = torch.cat([bert1, bert2], 1)
+                all_phoneme_ids = torch.LongTensor(phones1+phones2).to(device).unsqueeze(0)
+            else:
+                bert = bert2
+                all_phoneme_ids = torch.LongTensor(phones2).to(device).unsqueeze(0)
+
+            bert = bert.to(device).unsqueeze(0)
+            all_phoneme_len = torch.tensor([all_phoneme_ids.shape[-1]]).to(device)
+
+            t2 = ttime()
+
+            if is_single_char:
+                single_char_temp = min(temperature, 0.5)
+                single_char_top_p = min(top_p, 0.7)
+                single_char_top_k = min(top_k, 15)
+                single_char_max_sec = min(max_sec, 2.0)
+                single_char_early_stop = hz * single_char_max_sec
+            else:
+                single_char_temp = temperature
+                single_char_top_p = top_p
+                single_char_top_k = top_k
+                single_char_early_stop = hz * max_sec
+
+            if(cache_key in cache and if_freeze==True):pred_semantic=cache[cache_key]
+            else:
+                with torch.no_grad():
+                    pred_semantic, idx = t2s_model.model.infer_panel(
+                        all_phoneme_ids,
+                        all_phoneme_len,
+                        None if ref_free else prompt,
+                        bert,
+                        top_k=single_char_top_k,
+                        top_p=single_char_top_p,
+                        temperature=single_char_temp,
+                        early_stop_num=single_char_early_stop,
+                    )
+                    pred_semantic = pred_semantic[:, -idx:].unsqueeze(0)
+                    cache[cache_key]=pred_semantic
+            t3 = ttime()
+            refers=[]
+            if(inp_refs):
+                for path in inp_refs:
+                    try:
+                        refer = get_spepc(hps, path.name).to(dtype).to(device)
+                        refers.append(refer)
+                    except:
+                        traceback.print_exc()
+            if(len(refers)==0):refers = [get_spepc(hps, ref_wav_path).to(dtype).to(device)]
+            audio = (vq_model.decode(pred_semantic, torch.LongTensor(phones2).to(device).unsqueeze(0), refers,speed=speed).detach().cpu().numpy()[0, 0])
             max_audio=np.abs(audio).max()
             if max_audio>1:audio/=max_audio
 
-        # 【字母音频拼接】如果有字母音频，先添加字母音频，再添加文本音频
-        if letter_audio is not None:
-            # 对字母音频也应用音量调整
-            letter_audio_volumed = letter_audio * volume if volume != 1.0 else letter_audio
-            max_letter_audio = np.abs(letter_audio_volumed).max()
-            if max_letter_audio > 1:
-                letter_audio_volumed /= max_letter_audio
-            audio_opt.append(letter_audio_volumed)
-            # 字母音频和文本音频之间插入短暂静音（0.05秒），使衔接更自然
-            short_gap = np.zeros(
-                int(hps.data.sampling_rate * 0.05),
-                dtype=np.float16 if is_half == True else np.float32,
-            )
-            audio_opt.append(short_gap)
-        
-        audio_opt.append(audio)
-        # 只在不是最后一段时插入静音，避免末尾出现不必要的停顿
-        # 同时减少静音时长，从0.15秒减少到0.1秒，使衔接更自然
-        if i_text < len(texts) - 1:
-            shorter_zero_wav = np.zeros(
-                int(hps.data.sampling_rate * 0.1),  # 进一步缩短到0.1秒
-                dtype=np.float16 if is_half == True else np.float32,
-            )
-            audio_opt.append(shorter_zero_wav)
-        t4 = ttime()
-        t.extend([t2 - t1,t3 - t2, t4 - t3])
-        t1 = ttime()
+            if is_single_char:
+                sample_rate = hps.data.sampling_rate
+                window_size = int(sample_rate * 0.05)
+                energy_threshold = 0.01
+                audio_len = len(audio)
+                if audio_len > window_size:
+                    last_high_energy_idx = audio_len - 1
+                    for i in range(audio_len - window_size, -1, -window_size):
+                        window = audio[max(0, i):min(i + window_size, audio_len)]
+                        window_energy = np.abs(window).max()
+                        if window_energy > energy_threshold:
+                            last_high_energy_idx = min(i + window_size * 2, audio_len)
+                            break
+                    tail_length = audio_len - last_high_energy_idx
+                    if tail_length > int(sample_rate * 0.3):
+                        audio = audio[:last_high_energy_idx]
+                        print(f"检测到单个字符文本拖尾，已截断 {tail_length/sample_rate:.2f} 秒")
+
+            if volume != 1.0:
+                audio = audio * volume
+                max_audio=np.abs(audio).max()
+                if max_audio>1:audio/=max_audio
+
+            if letter_audio is not None:
+                append_prepared_audio(
+                    audio_opt, letter_audio, hps.data.sampling_rate, volume, is_half, gap_sec=0.05
+                )
+
+            audio_opt.append(audio)
+            if add_line_gap:
+                shorter_zero_wav = np.zeros(
+                    int(hps.data.sampling_rate * 0.1),
+                    dtype=np.float16 if is_half == True else np.float32,
+                )
+                audio_opt.append(shorter_zero_wav)
+            t4 = ttime()
+            t.extend([t2 - t1,t3 - t2, t4 - t3])
+            t1 = ttime()
     # print("%.3f\t%.3f\t%.3f\t%.3f" % 
     #        (t[0], sum(t[1::3]), sum(t[2::3]), sum(t[3::3]))
     #        )
@@ -1434,7 +1452,122 @@ def _results_sync_payload(action, row=None, rows=None):
         payload["rows"] = rows
     return json.dumps(payload, ensure_ascii=False)
 
-def batch_generation(file, name_column, text_column, data_frame, ref_wav_path, prompt_text, prompt_language, text_language, how_to_cut, top_k, top_p, temperature, ref_free, speed, if_freeze, inp_refs, volume, output_dir, output_format):
+def _normalize_row_name(val):
+    """统一「命名」键，兼容 Excel 整数被读成 1 / 1.0 / '1'。"""
+    if val is None:
+        return ""
+    s = str(val).strip()
+    if not s or s.lower() == "nan":
+        return ""
+    try:
+        f = float(s)
+        if f.is_integer():
+            return str(int(f))
+    except Exception:
+        pass
+    return s
+
+def _normalize_name_map(mapping):
+    if not isinstance(mapping, dict):
+        return {}
+    out = {}
+    for key, val in mapping.items():
+        name = _normalize_row_name(key)
+        if name:
+            out[name] = val
+    return out
+
+def _lookup_named_value(mapping, name):
+    if not isinstance(mapping, dict) or not name:
+        return None, False
+    if name in mapping:
+        return mapping[name], True
+    return None, False
+
+def _apply_process_flags_to_df(df, process_flags_json, name_column=None):
+    """将页面勾选状态合并进 DataFrame（解决自定义勾选框未回写 Gradio 的问题）。"""
+    if df is None or (hasattr(df, "empty") and df.empty):
+        return df
+    if not process_flags_json:
+        return df
+    try:
+        flags = json.loads(process_flags_json)
+    except Exception:
+        return df
+    if "是否处理" not in df.columns:
+        return df
+    out = df.copy()
+    col_idx = out.columns.get_loc("是否处理")
+
+    if isinstance(flags, dict):
+        default = flags.get("default")
+        if default is None:
+            default = True
+        by_name = _normalize_name_map(flags.get("by_name") or {})
+        by_index = flags.get("by_index") or {}
+        for i in range(len(out)):
+            name = ""
+            if name_column and name_column in out.columns:
+                name = _normalize_row_name(out.iloc[i][name_column])
+            checked = None
+            found = False
+            val, found = _lookup_named_value(by_name, name)
+            if found:
+                checked = bool(val)
+            else:
+                idx_key = str(i)
+                if idx_key in by_index:
+                    checked = bool(by_index[idx_key])
+                elif i in by_index:
+                    checked = bool(by_index[i])
+                else:
+                    checked = bool(default)
+            out.iat[i, col_idx] = bool(checked)
+        return out
+
+    if not isinstance(flags, list):
+        return df
+    # 旧格式：按位置写回。Gradio 虚拟表只渲染可见行（还可能带 spacer），
+    # 短数组按 index 对齐会把后面的行错写到前面的文件名上。
+    if len(flags) != len(out):
+        return out
+    for i, flag in enumerate(flags):
+        out.iat[i, col_idx] = bool(flag)
+    return out
+
+def _apply_preview_texts_to_df(df, texts_json, text_column, name_column=None):
+    """将页面「配音内容」编辑合并进 DataFrame（避免 Gradio 重渲染导致编辑丢失）。"""
+    if df is None or (hasattr(df, "empty") and df.empty):
+        return df
+    if not texts_json or text_column not in df.columns:
+        return df
+    try:
+        texts = json.loads(texts_json)
+    except Exception:
+        return df
+    out = df.copy()
+    col_idx = out.columns.get_loc(text_column)
+
+    if isinstance(texts, dict):
+        by_name = _normalize_name_map(texts.get("by_name") or {})
+        if not name_column or name_column not in out.columns:
+            return out
+        for i in range(len(out)):
+            name = _normalize_row_name(out.iloc[i][name_column])
+            val, found = _lookup_named_value(by_name, name)
+            if found:
+                out.iat[i, col_idx] = val
+        return out
+
+    if not isinstance(texts, list):
+        return df
+    if len(texts) != len(out):
+        return out
+    for i, text in enumerate(texts):
+        out.iat[i, col_idx] = text
+    return out
+
+def batch_generation(file, name_column, text_column, data_frame, ref_wav_path, prompt_text, prompt_language, text_language, how_to_cut, top_k, top_p, temperature, ref_free, speed, if_freeze, inp_refs, volume, output_dir, output_format, process_flags_json="[]", preview_texts_json="[]"):
     global stop_batch, pause_batch, cache, _ref_audio_cache
     stop_batch = False
     pause_batch = False
@@ -1462,6 +1595,48 @@ def batch_generation(file, name_column, text_column, data_frame, ref_wav_path, p
     if text_column not in df.columns:
         yield f"在表格中找不到内容列: {text_column}", gr.update(), []
         return
+
+    df = _apply_process_flags_to_df(df, process_flags_json, name_column=name_column)
+    df = _apply_preview_texts_to_df(df, preview_texts_json, text_column, name_column=name_column)
+    try:
+        flags = json.loads(process_flags_json or "[]")
+        if isinstance(flags, dict):
+            by_name = flags.get("by_name") or {}
+            n_on = sum(1 for v in by_name.values() if v)
+            print(
+                f"Batch process flags v2 default={flags.get('default')} "
+                f"named={n_on}/{len(by_name)} keys={list(by_name.keys())[:30]}"
+            )
+        elif isinstance(flags, list):
+            n_on = sum(1 for f in flags if f)
+            print(f"Batch process flags from UI: {n_on}/{len(flags)} rows checked")
+    except Exception:
+        pass
+    try:
+        texts = json.loads(preview_texts_json or "[]")
+        if isinstance(texts, dict):
+            by_name = texts.get("by_name") or {}
+            print(f"Batch preview texts v2: {len(by_name)} named row(s)")
+        elif isinstance(texts, list) and texts:
+            print(f"Batch preview texts from UI: {len(texts)} row(s)")
+    except Exception:
+        pass
+    try:
+        if "是否处理" in df.columns and name_column in df.columns:
+            selected = []
+            for i in range(len(df)):
+                val = df.iloc[i]["是否处理"]
+                if isinstance(val, bool):
+                    is_on = val
+                elif val is None:
+                    is_on = False
+                else:
+                    is_on = str(val).strip().lower() in ["true", "1", "yes", "是", "on", "t"]
+                if is_on:
+                    selected.append(_normalize_row_name(df.iloc[i][name_column]))
+            print(f"Batch will generate {len(selected)}/{len(df)} files: {selected}")
+    except Exception:
+        pass
 
     # 使用用户指定的输出目录，如果未指定则使用默认
     if not output_dir or output_dir.strip() == "":
@@ -1717,7 +1892,7 @@ if init_sovits_path and init_sovits_path in SoVITS_names:
 change_sovits_weights(sovits_path)
 change_gpt_weights(gpt_path)
 
-# 批量生成页：吸底操作栏 + 表格内部独立滚动（避免整页跟着滑/编辑时跳动）
+# 批量生成页：吸底操作栏；预览表一次渲染全部行，用页面滚动，不用表内虚拟滚动
 _BATCH_UI_CSS = """
 .batch-sticky-actions {
     position: fixed;
@@ -1824,17 +1999,19 @@ _BATCH_UI_CSS = """
 }
 #batch_preview_df {
     overflow: visible !important;
-    overscroll-behavior: contain;
 }
-/* 只让表格内部（VirtualTable）滚动，外层容器不再出现第二条滚动条 */
+/* 关掉 VirtualTable 内部滚动，一次撑开全部行，由页面滚动 */
 #batch_preview_df .overflow-y-auto,
-#batch_preview_df .svelte-1ipelgc {
+#batch_preview_df .svelte-1ipelgc,
+#batch_preview_df .table-wrap,
+#batch_preview_df svelte-virtual-table-viewport,
+#batch_preview_df table {
     max-height: none !important;
+    height: auto !important;
     overflow: visible !important;
 }
 #batch_preview_df .table-wrap {
-    max-height: none !important;
-    overflow: hidden !important;
+    min-height: 80px;
 }
 /* 生成结果：原生表格按内容撑开，无内部滚动 */
 #batch_results_df {
@@ -1910,28 +2087,32 @@ _BATCH_UI_CSS = """
 #batch_preview_df td.batch-text-cell {
     min-width: 360px !important;
     width: 62% !important;
+    vertical-align: top !important;
+    padding: 4px 6px !important;
 }
 #batch_preview_df td.batch-text-cell .cell-wrap {
     display: block;
     width: 100%;
     position: relative;
 }
+#batch_preview_df td.batch-text-cell span:not(.edit) {
+    display: none !important;
+}
 #batch_preview_df td.batch-text-cell span.edit {
     display: none !important;
 }
-#batch_preview_df td.batch-text-cell span:not(.edit) {
-    display: block;
-    min-height: 0;
-    padding: 6px 8px !important;
-    border: 1px solid var(--input-border-color, #c5c5d2);
-    border-radius: 6px;
-    background: var(--input-background-fill, #fff);
-    line-height: 1.5;
-    white-space: pre-wrap !important;
-    word-break: break-word !important;
+#batch_preview_df td.batch-text-cell input:not([type=checkbox]) {
+    display: none !important;
 }
-#batch_preview_df textarea.batch-cell-textarea {
+#batch_preview_df td.batch-text-cell textarea:not(.batch-preview-textarea) {
+    display: none !important;
+}
+#batch_preview_df textarea.batch-cell-textarea,
+#batch_results_html textarea.batch-result-textarea {
     display: block;
+    position: relative;
+    z-index: 2;
+    pointer-events: auto;
     width: 100%;
     min-height: 36px;
     max-height: none;
@@ -1947,16 +2128,264 @@ _BATCH_UI_CSS = """
     color: inherit;
     white-space: pre-wrap;
     word-break: break-word;
-    border: 1px solid var(--color-accent, #2563eb);
+    border: 1px solid var(--input-border-color, #c5c5d2);
     border-radius: 6px;
     background: var(--input-background-fill, #fff);
     outline: none;
+}
+#batch_preview_df textarea.batch-cell-textarea:focus,
+#batch_results_html textarea.batch-result-textarea:focus {
+    border-color: var(--color-accent, #2563eb);
+}
+#batch_results_html th:nth-child(3),
+#batch_results_html td.batch-result-text {
+    min-width: 280px;
+    height: auto !important;
+    overflow: visible !important;
+}
+#batch_results_html tr {
+    height: auto !important;
 }
 """
 
 _BATCH_UI_HEAD = """
 <script>
 (function () {
+  function fitTextarea(ta) {
+    if (!ta) return;
+    ta.style.height = "auto";
+    ta.style.minHeight = "36px";
+    var next = ta.scrollHeight;
+    if (next < 36) next = 36;
+    ta.style.height = next + "px";
+    ta.style.overflow = "hidden";
+  }
+  function fitAllResultTextareas() {
+    var root = document.getElementById("batch_results_html");
+    if (!root) return;
+    Array.prototype.forEach.call(root.querySelectorAll("textarea.batch-result-textarea"), fitTextarea);
+  }
+  function scheduleFitResultTextareas() {
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () { fitAllResultTextareas(); });
+    });
+  }
+  window._resultTextCache = window._resultTextCache || {};
+  window._resultRows = window._resultRows || [];
+  function cacheResultText(filename, text) {
+    if (!filename) return;
+    window._resultTextCache[filename] = text == null ? "" : String(text);
+  }
+  function resultTextFor(filename, fallback) {
+    if (filename && Object.prototype.hasOwnProperty.call(window._resultTextCache, filename)) {
+      return window._resultTextCache[filename];
+    }
+    return fallback == null ? "" : String(fallback);
+  }
+  function upsertResultRow(row, overwriteText) {
+    if (!row || !row.filename) return;
+    var key = String(row.filename);
+    var found = null;
+    for (var i = 0; i < window._resultRows.length; i++) {
+      if (window._resultRows[i].filename === key) { found = window._resultRows[i]; break; }
+    }
+    var text = overwriteText ? (row.text || "") : resultTextFor(key, row.text || "");
+    cacheResultText(key, text);
+    var next = { filename: key, text: text, audio_url: row.audio_url || (found ? found.audio_url : "") };
+    if (found) {
+      found.text = next.text;
+      if (row.audio_url) found.audio_url = row.audio_url;
+    } else {
+      window._resultRows.push(next);
+    }
+  }
+  function bindResultTextarea(ta, filename) {
+    if (!ta || ta.dataset.bound === "1") return;
+    ta.dataset.bound = "1";
+    ta.addEventListener("input", function () {
+      fitTextarea(ta);
+      cacheResultText(filename, ta.value);
+      upsertResultRow({ filename: filename, text: ta.value }, true);
+    });
+    ta.addEventListener("keydown", function (e) { e.stopPropagation(); });
+    ["mousedown", "mouseup", "click", "pointerdown", "pointerup"].forEach(function (ev) {
+      ta.addEventListener(ev, function (e) { e.stopPropagation(); }, true);
+    });
+    fitTextarea(ta);
+  }
+  function createResultTextarea(text, filename) {
+    var ta = document.createElement("textarea");
+    ta.className = "batch-cell-textarea batch-result-textarea";
+    ta.value = resultTextFor(filename, text || "");
+    ta.rows = 1;
+    bindResultTextarea(ta, filename);
+    return ta;
+  }
+  function readResultsRowsFromDom() {
+    var rows = [];
+    var tbody = document.getElementById("batch_results_tbody");
+    if (tbody) {
+      Array.prototype.forEach.call(tbody.querySelectorAll("tr"), function (tr) {
+        var filename = tr.getAttribute("data-name") || "";
+        var ta = tr.querySelector(".batch-result-textarea");
+        var text = ta ? ta.value : "";
+        var audio = tr.querySelector("audio");
+        var audio_url = audio ? (audio.getAttribute("src") || "") : "";
+        if (filename) {
+          cacheResultText(filename, text);
+          rows.push({ filename: filename, text: text, audio_url: audio_url });
+        }
+      });
+    }
+    if (rows.length) {
+      window._resultRows = rows;
+      return rows;
+    }
+    return (window._resultRows || []).map(function (r) {
+      return {
+        filename: r.filename,
+        text: resultTextFor(r.filename, r.text),
+        audio_url: r.audio_url || ""
+      };
+    });
+  }
+  window.readResultsRowsFromDom = readResultsRowsFromDom;
+  function isPreviewDataRow(tr) {
+    if (!tr) return false;
+    if (tr.querySelector("th")) return false;
+    var tds = tr.querySelectorAll("td");
+    // Gradio VirtualTable spacer rows typically have a single empty td
+    if (!tds || tds.length < 3) return false;
+    return true;
+  }
+  function getPreviewDataRows(root) {
+    var rows = [];
+    if (!root) return rows;
+    Array.prototype.forEach.call(root.querySelectorAll("tbody tr"), function (tr) {
+      if (isPreviewDataRow(tr)) rows.push(tr);
+    });
+    return rows;
+  }
+  function cacheKeyName(key) {
+    if (!key || key.indexOf("n:") !== 0) return "";
+    return normalizeRowName(key.slice(2));
+  }
+  function normalizeRowName(name) {
+    name = String(name == null ? "" : name).trim();
+    if (!name) return "";
+    if (/^-?\d+\.0+$/.test(name) || /^-?\d+$/.test(name)) return String(parseInt(name, 10));
+    return name;
+  }
+  function collectPreviewProcessFlags() {
+    var root = document.getElementById("batch_preview_df");
+    getPreviewDataRows(root).forEach(function (tr) {
+      var key = previewRowKey(tr);
+      var td = tr.querySelector("td.batch-check-col") || tr.children[0];
+      var cb = td ? (td.querySelector(".batch-native-check") || td.querySelector('input[type=checkbox]')) : null;
+      if (key && cb) window._previewProcessCache[key] = !!cb.checked;
+    });
+    var byName = {};
+    Object.keys(window._previewProcessCache || {}).forEach(function (k) {
+      var name = cacheKeyName(k);
+      if (name) byName[name] = !!window._previewProcessCache[k];
+    });
+    return JSON.stringify({
+      version: 2,
+      default: window._previewProcessDefault === false ? false : true,
+      by_name: byName
+    });
+  }
+  window.collectPreviewProcessFlags = collectPreviewProcessFlags;
+  function collectPreviewTexts() {
+    var root = document.getElementById("batch_preview_df");
+    getPreviewDataRows(root).forEach(function (tr) {
+      var key = previewRowKey(tr);
+      var td = tr.querySelector("td.batch-text-cell") || tr.children[tr.children.length - 1];
+      if (!td) return;
+      var ta = td.querySelector("textarea.batch-preview-textarea");
+      if (key && ta) cachePreviewText(key, ta.value);
+    });
+    var byName = {};
+    Object.keys(window._previewTextCache || {}).forEach(function (k) {
+      var name = cacheKeyName(k);
+      if (name) byName[name] = window._previewTextCache[k];
+    });
+    return JSON.stringify({ version: 2, by_name: byName });
+  }
+  window.collectPreviewTexts = collectPreviewTexts;
+  window._previewTextCache = window._previewTextCache || {};
+  window._previewProcessCache = window._previewProcessCache || {};
+  window._previewProcessDefault = true;
+  function resolveProcessChecked(key) {
+    if (key && Object.prototype.hasOwnProperty.call(window._previewProcessCache, key)) {
+      return !!window._previewProcessCache[key];
+    }
+    if (window._previewProcessDefault !== null && window._previewProcessDefault !== undefined) {
+      return !!window._previewProcessDefault;
+    }
+    return false;
+  }
+  function setProcessChecked(tr, td, checked) {
+    var key = tr ? previewRowKey(tr) : "";
+    if (key) window._previewProcessCache[key] = !!checked;
+    var cb = td.querySelector(".batch-native-check") || td.querySelector('input[type=checkbox]');
+    if (cb) cb.checked = !!checked;
+  }
+  function syncProcessCheck(td) {
+    var tr = td.closest("tr");
+    if (!tr) return;
+    var key = previewRowKey(tr);
+    var checked = resolveProcessChecked(key);
+    var cb = td.querySelector(".batch-native-check") || td.querySelector('input[type=checkbox]');
+    if (cb && cb.checked !== checked) cb.checked = checked;
+  }
+  function previewRowKey(tr) {
+    if (!tr) return "";
+    var nameTd = tr.querySelector("td.batch-name-col");
+    if (!nameTd) {
+      var cells = tr.querySelectorAll("td");
+      if (cells.length >= 4) nameTd = cells[3];
+    }
+    if (nameTd) {
+      var s = nameTd.querySelector("span:not(.edit)");
+      var ta = nameTd.querySelector("textarea");
+      var hidden = nameTd.querySelector("input:not([type=checkbox])");
+      var name = String(
+        (ta && ta.value) || (hidden && hidden.value) || (s ? s.textContent : nameTd.textContent) || ""
+      ).trim();
+      if (name) return "n:" + normalizeRowName(name);
+    }
+    return "";
+  }
+  function cachePreviewText(key, text) {
+    if (!key) return;
+    window._previewTextCache[key] = text;
+  }
+  function readCachedPreviewText(key, fallback) {
+    if (key && Object.prototype.hasOwnProperty.call(window._previewTextCache, key)) {
+      return window._previewTextCache[key];
+    }
+    return fallback;
+  }
+  function setAllPreviewProcessFlags(checked) {
+    window._previewProcessDefault = !!checked;
+    window._previewProcessCache = {};
+    var root = document.getElementById("batch_preview_df");
+    if (!root) return;
+    getPreviewDataRows(root).forEach(function (tr) {
+      var td = tr.querySelector("td.batch-check-col") || tr.children[0];
+      if (!td) return;
+      var key = previewRowKey(tr);
+      if (key) window._previewProcessCache[key] = !!checked;
+      var cb = td.querySelector(".batch-native-check") || td.querySelector('input[type=checkbox]');
+      if (cb) cb.checked = !!checked;
+    });
+  }
+  window.setAllPreviewProcessFlags = setAllPreviewProcessFlags;
+  function parseProcessChecked(val) {
+    var s = String(val == null ? "" : val).trim().toLowerCase();
+    return s === "true" || s === "1" || s === "t" || s === "yes" || s === "是" || s === "on";
+  }
   function applyBatchResults(payload) {
     if (!payload) return;
     var data = payload;
@@ -1966,12 +2395,22 @@ _BATCH_UI_HEAD = """
     if (!data || !data.action) return;
     var tbody = document.getElementById("batch_results_tbody");
     if (!tbody) return;
-    function addRow(row) {
+    function addRow(row, overwriteText) {
       if (!row || !row.filename) return;
-      var existed = tbody.querySelector('tr[data-name="' + String(row.filename).replace(/"/g, "") + '"]');
+      var key = String(row.filename).replace(/"/g, "");
+      upsertResultRow(row, !!overwriteText);
+      var text = resultTextFor(key, row.text || "");
+      var existed = tbody.querySelector('tr[data-name="' + key + '"]');
       if (existed) {
         var audioOld = existed.querySelector("audio");
-        if (audioOld && row.audio_url) audioOld.src = row.audio_url;
+        if (audioOld && row.audio_url && audioOld.getAttribute("src") !== row.audio_url) {
+          audioOld.src = row.audio_url;
+        }
+        var taOld = existed.querySelector(".batch-result-textarea");
+        if (taOld && overwriteText && taOld.value !== text) {
+          taOld.value = text;
+          fitTextarea(taOld);
+        }
         return;
       }
       var tr = document.createElement("tr");
@@ -1993,7 +2432,8 @@ _BATCH_UI_HEAD = """
       var td1 = document.createElement("td");
       td1.textContent = row.filename || "";
       var td2 = document.createElement("td");
-      td2.textContent = row.text || "";
+      td2.className = "batch-result-text";
+      td2.appendChild(createResultTextarea(text, key));
       var td3 = document.createElement("td");
       var audio = document.createElement("audio");
       audio.controls = true;
@@ -2008,18 +2448,42 @@ _BATCH_UI_HEAD = """
     }
     if (data.action === "reset") {
       tbody.innerHTML = "";
+      window._resultRows = [];
+      window._resultTextCache = {};
       return;
     }
     if (data.action === "append" && data.row) {
-      addRow(data.row);
+      addRow(data.row, false);
+      scheduleFitResultTextareas();
       return;
     }
     if (data.action === "replace") {
       tbody.innerHTML = "";
-      (data.rows || []).forEach(addRow);
+      window._resultRows = [];
+      window._resultTextCache = {};
+      (data.rows || []).forEach(function (row) { addRow(row, true); });
+      scheduleFitResultTextareas();
     }
   }
   window.applyBatchResults = applyBatchResults;
+  function restoreResultsIfNeeded() {
+    var tbody = document.getElementById("batch_results_tbody");
+    if (!tbody) return;
+    var rows = window._resultRows || [];
+    if (!rows.length) return;
+    var missing = false;
+    for (var i = 0; i < rows.length; i++) {
+      var key = String(rows[i].filename || "").replace(/"/g, "");
+      if (key && !tbody.querySelector('tr[data-name="' + key + '"]')) {
+        missing = true;
+        break;
+      }
+    }
+    if (!missing) return;
+    rows.slice().forEach(function (row) {
+      applyBatchResults({ action: "append", row: row });
+    });
+  }
   function hookResultsSync() {
     var box = document.querySelector("#batch_results_sync textarea") || document.querySelector("#batch_results_sync input");
     if (!box || box.dataset.hooked === "1") return;
@@ -2059,53 +2523,35 @@ _BATCH_UI_HEAD = """
     ths.forEach(function (th, i) {
       if (classes[i]) th.classList.add(classes[i]);
     });
-    Array.prototype.forEach.call(root.querySelectorAll("tbody tr"), function (tr) {
+    getPreviewDataRows(root).forEach(function (tr) {
       classes.forEach(function (cls, i) {
         if (cls && tr.children[i]) tr.children[i].classList.add(cls);
       });
     });
   }
-  function parseProcessChecked(val) {
-    var s = String(val == null ? "" : val).trim().toLowerCase();
-    return s === "true" || s === "1" || s === "t" || s === "yes" || s === "是" || s === "on";
-  }
   function writeProcessCell(td, checked) {
-    var v = checked ? "true" : "false";
-    var wrap = td.querySelector(".cell-wrap") || td;
-    var span = wrap.querySelector("span");
-    var hidden = wrap.querySelector("input:not([type=checkbox])");
-    if (span) span.textContent = v;
-    if (hidden) {
-      hidden.value = v;
-      hidden.dispatchEvent(new Event("input", { bubbles: true }));
-      hidden.dispatchEvent(new Event("change", { bubbles: true }));
-      hidden.dispatchEvent(new Event("blur", { bubbles: true }));
-      return;
-    }
-    td.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
-    setTimeout(function () {
-      var inp = td.querySelector("input:not([type=checkbox])");
-      if (inp) {
-        inp.value = v;
-        inp.dispatchEvent(new Event("input", { bubbles: true }));
-        inp.dispatchEvent(new Event("blur", { bubbles: true }));
-      }
-    }, 0);
+    var tr = td.closest("tr");
+    setProcessChecked(tr, td, checked);
   }
   function upgradeProcessChecks(root) {
     Array.prototype.forEach.call(root.querySelectorAll("td.batch-check-col"), function (td) {
+      var tr = td.closest("tr");
+      var key = tr ? previewRowKey(tr) : "";
       var existed = td.querySelector(".batch-native-check");
       if (existed) {
-        var span = td.querySelector("span");
-        if (span) {
-          var now = parseProcessChecked(span.textContent);
-          if (existed.checked !== now) existed.checked = now;
-        }
+        syncProcessCheck(td);
         return;
       }
       var gcheck = td.querySelector("input[type=checkbox]");
       if (gcheck) {
         gcheck.classList.add("batch-native-check");
+        if (!gcheck.dataset.bound) {
+          gcheck.dataset.bound = "1";
+          gcheck.addEventListener("change", function () {
+            setProcessChecked(tr, td, gcheck.checked);
+          });
+        }
+        syncProcessCheck(td);
         return;
       }
       var wrap = td.querySelector(".cell-wrap") || td;
@@ -2117,84 +2563,112 @@ _BATCH_UI_HEAD = """
       var cb = document.createElement("input");
       cb.type = "checkbox";
       cb.className = "batch-native-check";
-      cb.checked = parseProcessChecked(val);
+      cb.checked = resolveProcessChecked(key);
       lab.appendChild(cb);
       wrap.insertBefore(lab, wrap.firstChild);
       cb.addEventListener("click", function (e) { e.stopPropagation(); });
-      cb.addEventListener("change", function () { writeProcessCell(td, cb.checked); });
+      cb.addEventListener("change", function () { setProcessChecked(tr, td, cb.checked); });
       td.addEventListener("click", function (e) {
         if (e.target === cb) return;
         e.preventDefault();
         e.stopPropagation();
         cb.checked = !cb.checked;
-        writeProcessCell(td, cb.checked);
+        setProcessChecked(tr, td, cb.checked);
       });
     });
   }
-  function fitTextarea(ta) {
-    if (!ta) return;
-    ta.style.height = "auto";
-    var next = ta.scrollHeight;
-    if (next < 36) next = 36;
-    ta.style.height = next + "px";
-    ta.style.overflow = "hidden";
+  function findGradioCellInput(td) {
+    var wrap = td.querySelector(".cell-wrap") || td;
+    return wrap.querySelector("input:not([type=checkbox])") || td.querySelector("input:not([type=checkbox])");
   }
-  function upgradeTextarea(input) {
-    if (!input || input.dataset.batchTa === "1") return;
-    var td = input.closest("td");
-    if (!td || !td.classList.contains("batch-text-cell")) return;
-    input.dataset.batchTa = "1";
-    var wrap = input.parentNode;
-    var ta = wrap.querySelector("textarea.batch-cell-textarea");
-    if (!ta) {
-      ta = document.createElement("textarea");
-      ta.className = "batch-cell-textarea";
-      ta.rows = 1;
-      wrap.insertBefore(ta, input);
-    }
-    var span = wrap.querySelector("span");
-    var recovered = input.value;
-    if (!recovered && span && span.textContent) recovered = span.textContent;
-    ta.value = recovered || "";
-    if (input.value !== ta.value) {
-      input.value = ta.value;
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-    }
-    input.setAttribute("tabindex", "-1");
-    input.style.cssText = "position:absolute;left:0;top:0;width:1px;height:1px;opacity:0;pointer-events:none;";
-    if (!ta.dataset.bound) {
-      ta.dataset.bound = "1";
-      ta.addEventListener("input", function () {
-        input.value = ta.value;
-        input.dispatchEvent(new Event("input", { bubbles: true }));
-        fitTextarea(ta);
-      });
-      ta.addEventListener("blur", function () {
-        input.value = ta.value;
-        input.dispatchEvent(new Event("input", { bubbles: true }));
-        input.dispatchEvent(new Event("change", { bubbles: true }));
-        input.dispatchEvent(new Event("blur", { bubbles: true }));
-      });
-      ta.addEventListener("keydown", function (e) {
-        e.stopPropagation();
-      });
-    }
-    setTimeout(function () {
+  function bindPreviewTextCellEvents(td) {
+    if (!td || td.dataset.previewEvents === "1") return;
+    td.dataset.previewEvents = "1";
+    td.addEventListener("dblclick", function (e) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    }, true);
+  }
+  function bindPreviewTextarea(ta, td, rowKey) {
+    if (!ta || ta.dataset.bound === "1") return;
+    ta.dataset.bound = "1";
+    ta.addEventListener("input", function () {
       fitTextarea(ta);
-      ta.focus();
-    }, 0);
+      cachePreviewText(rowKey, ta.value);
+    });
+    ta.addEventListener("keydown", function (e) { e.stopPropagation(); });
+    ["mousedown", "mouseup", "click", "pointerdown", "pointerup"].forEach(function (ev) {
+      ta.addEventListener(ev, function (e) { e.stopPropagation(); }, true);
+    });
+    fitTextarea(ta);
+  }
+  function cleanupGradioEditUI(td) {
+    var wrap = td.querySelector(".cell-wrap") || td;
+    wrap.querySelectorAll("textarea:not(.batch-preview-textarea)").forEach(function (el) { el.remove(); });
+    wrap.querySelectorAll("span.edit").forEach(function (el) { el.remove(); });
+  }
+  function installPreviewTextCell(td) {
+    if (!td || !td.classList.contains("batch-text-cell")) return;
+    bindPreviewTextCellEvents(td);
+    cleanupGradioEditUI(td);
+    var wrap = td.querySelector(".cell-wrap") || td;
+    var tr = td.closest("tr");
+    var rowKey = tr ? previewRowKey(tr) : "";
+    var ta = wrap.querySelector("textarea.batch-preview-textarea");
+    if (ta) {
+      td.dataset.previewTa = "1";
+      if (document.activeElement !== ta) {
+        var cached = readCachedPreviewText(rowKey, null);
+        if (cached !== null && ta.value !== cached) ta.value = cached;
+      }
+      fitTextarea(ta);
+      return;
+    }
+    td.dataset.previewTa = "1";
+    var span = wrap.querySelector("span:not(.edit)");
+    var hidden = findGradioCellInput(td);
+    var fallback = span ? span.textContent : (hidden ? hidden.value : "");
+    var text = readCachedPreviewText(rowKey, fallback);
+    ta = document.createElement("textarea");
+    ta.className = "batch-cell-textarea batch-preview-textarea";
+    ta.value = text || "";
+    ta.rows = 1;
+    bindPreviewTextarea(ta, td, rowKey);
+    wrap.appendChild(ta);
+  }
+  function installPreviewTextCells(root) {
+    Array.prototype.forEach.call(root.querySelectorAll("td.batch-text-cell"), installPreviewTextCell);
+  }
+  var previewScanTimer = null;
+  var _lastPreviewRowCount = 0;
+  function maybeResetPreviewCaches(root) {
+    var n = getPreviewDataRows(root).length;
+    if (!n) return;
+    // VirtualTable 可见行数会变，不能据此清空勾选/文案缓存，否则滚动后选中状态丢失。
+    _lastPreviewRowCount = n;
   }
   function scan(root) {
     if (!root) return;
+    maybeResetPreviewCaches(root);
     markTextCells(root);
     upgradeProcessChecks(root);
-    Array.prototype.forEach.call(root.querySelectorAll("td.batch-text-cell input:not([type=checkbox])"), upgradeTextarea);
+    installPreviewTextCells(root);
+  }
+  function schedulePreviewScan(root) {
+    if (root.querySelector("textarea.batch-preview-textarea:focus")) return;
+    if (previewScanTimer) clearTimeout(previewScanTimer);
+    previewScanTimer = setTimeout(function () {
+      previewScanTimer = null;
+      if (root.querySelector("textarea.batch-preview-textarea:focus")) return;
+      scan(root);
+    }, 80);
   }
   function boot() {
     var obs = new MutationObserver(function () {
       var preview = document.getElementById("batch_preview_df");
-      if (preview) scan(preview);
+      if (preview) schedulePreviewScan(preview);
       hookResultsSync();
+      restoreResultsIfNeeded();
     });
     obs.observe(document.body, { childList: true, subtree: true });
     document.addEventListener("keydown", function (e) {
@@ -2207,6 +2681,8 @@ _BATCH_UI_HEAD = """
     var root = document.getElementById("batch_preview_df");
     if (root) scan(root);
     hookResultsSync();
+    restoreResultsIfNeeded();
+    scheduleFitResultTextareas();
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
   else boot();
@@ -2407,13 +2883,15 @@ with gr.Blocks(title="GPT-SoVITS WebUI", css=_BATCH_UI_CSS, head=_BATCH_UI_HEAD)
                 DEFAULT_DATATYPE = ["bool"] + ["str"] * 100
                 
                 batch_preview = gr.DataFrame(
-                    label="完整数据预览与编辑（第一列勾选控制是否生成；双击「配音内容」可用多行框修改）", 
+                    label="完整数据预览与编辑（第一列勾选控制是否生成；「配音内容」可直接修改）", 
                     value=[[True, "示例文件名", "示例内容"]], 
                     headers=["是否处理", "文件名", "文本内容"], 
                     interactive=True,
                     type="pandas",
                     wrap=True,
-                    height=520,
+                    # Gradio 4.44 VirtualTable 用 height 当 max_height：够大才会一次挂上全部行。
+                    # 实际高度由内容撑开（CSS 关掉表内滚动）。
+                    height=100000,
                     elem_id="batch_preview_df",
                     # col_count=(3, "dynamic"), 
                     datatype=DEFAULT_DATATYPE 
@@ -2428,23 +2906,17 @@ with gr.Blocks(title="GPT-SoVITS WebUI", css=_BATCH_UI_CSS, head=_BATCH_UI_HEAD)
                     s = str(val).strip().lower()
                     return s in ("true", "1", "yes", "是", "on", "t")
 
-                # 批量修改状态的函数
-                def set_all_status(df, status):
-                    if df is None or df.empty:
-                        return gr.update()
-                    try:
-                        # 确保第一列存在
-                        if len(df.columns) > 0:
-                            # 修改第一列的所有值为 status (True/False)
-                            df.iloc[:, 0] = bool(status)
-                        return gr.update(value=df)
-                    except Exception as e:
-                        print(f"Error updating dataframe: {e}")
-                        return gr.update()
-
-                # 绑定按钮事件
-                btn_check_all.click(lambda df: set_all_status(df, True), [batch_preview], [batch_preview])
-                btn_uncheck_all.click(lambda df: set_all_status(df, False), [batch_preview], [batch_preview])
+                # 全选/取消全选：仅在前端切换勾选，避免刷新 DataFrame 导致「配音内容」丢失
+                btn_check_all.click(
+                    lambda: None,
+                    js="() => { if (window.setAllPreviewProcessFlags) window.setAllPreviewProcessFlags(true); }",
+                    queue=False,
+                )
+                btn_uncheck_all.click(
+                    lambda: None,
+                    js="() => { if (window.setAllPreviewProcessFlags) window.setAllPreviewProcessFlags(false); }",
+                    queue=False,
+                )
 
                 # 核心读取逻辑提取
                 def read_excel_with_sheet(file, sheet_name=None):
@@ -2598,10 +3070,13 @@ with gr.Blocks(title="GPT-SoVITS WebUI", css=_BATCH_UI_CSS, head=_BATCH_UI_HEAD)
                 batch_results_state = gr.State([])
                 results_sync = gr.Textbox(visible=False, elem_id="batch_results_sync")
                 regen_checked_json = gr.Textbox(value="[]", visible=False, elem_id="regen_checked_json")
+                results_rows_json = gr.Textbox(value="[]", visible=False, elem_id="results_rows_json")
+                batch_process_flags = gr.Textbox(value="[]", visible=False, elem_id="batch_process_flags")
+                batch_preview_texts_json = gr.Textbox(value="[]", visible=False, elem_id="batch_preview_texts_json")
                 
                 with gr.Row():
                     gr.Markdown(
-                        "在「待重生成」列勾选不满意的行，试听结束后点击「批量重新生成勾选行」统一重做；重新生成后仅展示本次成功重做的结果。「清除勾选」可一键取消所有勾选。"
+                        "在「待重生成」列勾选不满意的行，可直接修改「文本内容」后点击「批量重新生成勾选行」；重新生成后仅展示本次成功重做的结果。"
                     )
 
                 # 操作按钮吸底：生成 / 暂停 / 终止 + 重新生成 / 清除勾选
@@ -2612,8 +3087,13 @@ with gr.Blocks(title="GPT-SoVITS WebUI", css=_BATCH_UI_CSS, head=_BATCH_UI_HEAD)
                     btn_regen_checked = gr.Button("批量重新生成勾选行", variant="primary", scale=2)
                     btn_clear_regen_marks = gr.Button("清除勾选", variant="secondary", scale=1)
 
-                def regenerate_checked_rows(results_state, checked_json, ref_wav_path, prompt_text, prompt_language, text_language, how_to_cut, top_k, top_p, temperature, ref_free, speed, if_freeze, inp_refs, volume, output_dir, output_format):
-                    rows = results_state or []
+                def regenerate_checked_rows(results_rows_json, checked_json, ref_wav_path, prompt_text, prompt_language, text_language, how_to_cut, top_k, top_p, temperature, ref_free, speed, if_freeze, inp_refs, volume, output_dir, output_format):
+                    try:
+                        rows = json.loads(results_rows_json or "[]")
+                    except Exception:
+                        rows = []
+                    if not isinstance(rows, list):
+                        rows = []
                     try:
                         names = json.loads(checked_json or "[]")
                     except Exception:
@@ -2623,7 +3103,9 @@ with gr.Blocks(title="GPT-SoVITS WebUI", css=_BATCH_UI_CSS, head=_BATCH_UI_HEAD)
                     name_set = {str(n).strip() for n in names if str(n).strip()}
                     selected = [r for r in rows if str(r.get("filename", "")).strip() in name_set]
                     if not selected:
-                        return "请先在「待重生成」列勾选需要重做的行。", gr.update(), rows
+                        return "请先在「待重生成」列勾选需要重做的行。", gr.update(), []
+
+                    print(f"Regenerate from UI: {len(selected)} row(s), names={sorted(name_set)}")
 
                     global cache
                     if not output_dir or str(output_dir).strip() == "":
@@ -2693,15 +3175,22 @@ with gr.Blocks(title="GPT-SoVITS WebUI", css=_BATCH_UI_CSS, head=_BATCH_UI_HEAD)
                     return msg, _results_sync_payload("replace", rows=regenerated_rows), regenerated_rows
 
                 _collect_checked_js = """
-(state, checked, refw, ptext, plang, tlang, cut, tok, top, temp, rfree, spd, freeze, refs, vol, odir, ofmt) => {
-  const names = Array.from(document.querySelectorAll('#batch_results_tbody .regen-check:checked')).map(c => c.getAttribute('data-name') || '');
-  return [state, JSON.stringify(names), refw, ptext, plang, tlang, cut, tok, top, temp, rfree, spd, freeze, refs, vol, odir, ofmt];
+(rowsJson, checked, refw, ptext, plang, tlang, cut, tok, top, temp, rfree, spd, freeze, refs, vol, odir, ofmt) => {
+  let rows = [];
+  if (window.readResultsRowsFromDom) {
+    rows = window.readResultsRowsFromDom();
+  }
+  if (!rows.length) {
+    try { rows = JSON.parse(rowsJson || "[]"); } catch (e) { rows = []; }
+  }
+  const names = Array.from(document.querySelectorAll('#batch_results_tbody .regen-check:checked')).map(c => c.getAttribute('data-name') || '').filter(Boolean);
+  return [JSON.stringify(rows), JSON.stringify(names), refw, ptext, plang, tlang, cut, tok, top, temp, rfree, spd, freeze, refs, vol, odir, ofmt];
 }
 """
 
                 btn_regen_checked.click(
                     regenerate_checked_rows,
-                    [batch_results_state, regen_checked_json, inp_ref, prompt_text, prompt_language, text_language, how_to_cut, top_k, top_p, temperature, ref_text_free, speed, if_freeze, inp_refs, volume, batch_output_dir, batch_output_format],
+                    [results_rows_json, regen_checked_json, inp_ref, prompt_text, prompt_language, text_language, how_to_cut, top_k, top_p, temperature, ref_text_free, speed, if_freeze, inp_refs, volume, batch_output_dir, batch_output_format],
                     [batch_status, results_sync, batch_results_state],
                     js=_collect_checked_js,
                 )
@@ -2720,13 +3209,32 @@ with gr.Blocks(title="GPT-SoVITS WebUI", css=_BATCH_UI_CSS, head=_BATCH_UI_HEAD)
                     js="(p) => { if (window.applyBatchResults) window.applyBatchResults(p); return p; }",
                 )
 
-                batch_file.change(handle_file_upload, [batch_file], [batch_preview, batch_sheet, batch_name_col, batch_text_col, batch_output_dir, batch_status])
-                batch_sheet.change(handle_sheet_change, [batch_file, batch_sheet], [batch_preview, batch_name_col, batch_text_col, batch_output_dir, batch_status])
+                batch_file.change(
+                    handle_file_upload,
+                    [batch_file],
+                    [batch_preview, batch_sheet, batch_name_col, batch_text_col, batch_output_dir, batch_status],
+                    js="(file) => { window._previewProcessCache = {}; window._previewTextCache = {}; window._previewProcessDefault = true; return [file]; }",
+                )
+                batch_sheet.change(
+                    handle_sheet_change,
+                    [batch_file, batch_sheet],
+                    [batch_preview, batch_name_col, batch_text_col, batch_output_dir, batch_status],
+                    js="(file, sheet) => { window._previewProcessCache = {}; window._previewTextCache = {}; window._previewProcessDefault = true; return [file, sheet]; }",
+                )
+
+                _batch_start_js = """
+(file, nameCol, textCol, preview, refw, ptext, plang, tlang, cut, tok, top, temp, rfree, spd, freeze, refs, vol, odir, ofmt, flags, texts) => {
+  const newFlags = (window.collectPreviewProcessFlags ? window.collectPreviewProcessFlags() : (flags || "[]"));
+  const newTexts = (window.collectPreviewTexts ? window.collectPreviewTexts() : (texts || "[]"));
+  return [file, nameCol, textCol, preview, refw, ptext, plang, tlang, cut, tok, top, temp, rfree, spd, freeze, refs, vol, odir, ofmt, newFlags, newTexts];
+}
+"""
 
                 batch_btn.click(
                     batch_generation,
-                    [batch_file, batch_name_col, batch_text_col, batch_preview, inp_ref, prompt_text, prompt_language, text_language, how_to_cut, top_k, top_p, temperature, ref_text_free, speed, if_freeze, inp_refs, volume, batch_output_dir, batch_output_format],
+                    [batch_file, batch_name_col, batch_text_col, batch_preview, inp_ref, prompt_text, prompt_language, text_language, how_to_cut, top_k, top_p, temperature, ref_text_free, speed, if_freeze, inp_refs, volume, batch_output_dir, batch_output_format, batch_process_flags, batch_preview_texts_json],
                     [batch_status, results_sync, batch_results_state],
+                    js=_batch_start_js,
                 )
                 batch_stop.click(stop_batch_task, [], [batch_status], queue=False)
                 batch_pause.click(pause_resume_batch_task, [], [batch_status, batch_pause], queue=False)
