@@ -490,37 +490,44 @@ def load_letter_audio(letter, sample_rate):
     return None
 
 PH_MARKER = "【PH】"
+PREPARED_CLIP_MARKERS = (
+    ("【PH试纸】", "PH试纸"),
+    ("【PH】", "PH"),
+)
 _ph_marker_audio_cache = {}
 
 def split_by_ph_marker(text):
-    """按【PH】标记拆分文本，返回 [('text', ...), ('ph', None), ...]"""
-    if PH_MARKER not in text:
+    """按预制音频标记拆分文本，返回 [('text', ...), ('ph', '【PH试纸】'), ...]。长标记优先。"""
+    pattern = "|".join(re.escape(marker) for marker, _stem in PREPARED_CLIP_MARKERS)
+    if not re.search(pattern, text):
         return [("text", text)]
-    parts = re.split(r'(【PH】)', text)
+    parts = re.split(f"({pattern})", text)
+    known = {marker for marker, _stem in PREPARED_CLIP_MARKERS}
     segments = []
     for part in parts:
         if not part:
             continue
-        if part == PH_MARKER:
-            segments.append(("ph", None))
+        if part in known:
+            segments.append(("ph", part))
         else:
             segments.append(("text", part))
     return segments if segments else [("text", text)]
 
-def load_ph_marker_audio(sample_rate):
-    """加载【PH】标记对应的预制音频（ABCD/PH.wav 或 PH.mp3）"""
-    if sample_rate in _ph_marker_audio_cache:
-        return _ph_marker_audio_cache[sample_rate]
-    for fname in ("PH.wav", "PH.mp3"):
+def load_ph_marker_audio(sample_rate, stem="PH"):
+    """加载标记对应的预制音频（ABCD/{stem}.wav 或 {stem}.mp3）"""
+    cache_key = (stem, sample_rate)
+    if cache_key in _ph_marker_audio_cache:
+        return _ph_marker_audio_cache[cache_key]
+    for fname in (f"{stem}.wav", f"{stem}.mp3"):
         audio_path = os.path.join(ABCD_AUDIO_DIR, fname)
         if os.path.exists(audio_path):
             try:
                 audio_data = load_audio(audio_path, sample_rate)
-                _ph_marker_audio_cache[sample_rate] = audio_data
-                print(f"已加载【PH】标记音频: {audio_path}")
+                _ph_marker_audio_cache[cache_key] = audio_data
+                print(f"已加载预制标记音频: {audio_path}")
                 return audio_data
             except Exception as e:
-                print(f"加载【PH】标记音频 {audio_path} 失败: {e}")
+                print(f"加载预制标记音频 {audio_path} 失败: {e}")
     return None
 
 def append_prepared_audio(audio_opt, audio_data, sample_rate, volume, is_half, gap_sec=0.05):
@@ -1000,14 +1007,16 @@ def get_tts_wav(ref_wav_path, prompt_text, prompt_language, text, text_language,
         sub_segments = split_by_ph_marker(line_text)
         for sub_i, (seg_kind, seg_text) in enumerate(sub_segments):
             if seg_kind == "ph":
-                ph_audio = load_ph_marker_audio(hps.data.sampling_rate)
+                marker = seg_text or PH_MARKER
+                stem = next((s for m, s in PREPARED_CLIP_MARKERS if m == marker), "PH")
+                ph_audio = load_ph_marker_audio(hps.data.sampling_rate, stem=stem)
                 if ph_audio is not None:
                     append_prepared_audio(
                         audio_opt, ph_audio, hps.data.sampling_rate, volume, is_half, gap_sec=0.05
                     )
-                    print("检测到【PH】标记，已插入预制音频")
+                    print(f"检测到{marker}标记，已插入预制音频 {stem}")
                 else:
-                    print("警告: 未找到【PH】标记音频，请检查 ABCD/PH.mp3 或 PH.wav")
+                    print(f"警告: 未找到{marker}标记音频，请检查 ABCD/{stem}.mp3 或 {stem}.wav")
                 continue
 
             text = seg_text
@@ -1444,8 +1453,12 @@ def single_inference_output(
         print(f"单条生成保存 MP3 失败: {e}，回退为 WAV 数据")
         return (sample_rate, audio_data)
 
+_results_sync_seq = 0
+
 def _results_sync_payload(action, row=None, rows=None):
-    payload = {"action": action}
+    global _results_sync_seq
+    _results_sync_seq += 1
+    payload = {"action": action, "seq": _results_sync_seq}
     if row is not None:
         payload["row"] = row
     if rows is not None:
@@ -1671,7 +1684,7 @@ def batch_generation(file, name_column, text_column, data_frame, ref_wav_path, p
         
         # 检查是否停止
         if stop_batch:
-            yield f"任务已终止。已处理 {index} / {total} 条。", gr.update(), results_list
+            yield f"任务已终止。已处理 {index} / {total} 条。", _results_sync_payload("replace", rows=results_list), results_list
             return
 
         # 检查是否暂停
@@ -1679,7 +1692,7 @@ def batch_generation(file, name_column, text_column, data_frame, ref_wav_path, p
             yield f"任务已暂停... 已处理 {index} / {total} 条。点击【继续】按钮继续。", gr.update(), results_list
             time.sleep(1)
             if stop_batch:
-                yield f"任务已终止。已处理 {index} / {total} 条。", gr.update(), results_list
+                yield f"任务已终止。已处理 {index} / {total} 条。", _results_sync_payload("replace", rows=results_list), results_list
                 return
         
         # 检查"是否处理"列 (如果存在)
@@ -1765,7 +1778,7 @@ def batch_generation(file, name_column, text_column, data_frame, ref_wav_path, p
             yield err_msg, gr.update(), results_list
             continue
             
-    yield f"处理完成！文件已保存至: {abs_output_dir}", gr.update(), results_list
+    yield f"处理完成！文件已保存至: {abs_output_dir}", _results_sync_payload("replace", rows=results_list), results_list
 
 def stop_batch_task():
     global stop_batch
@@ -1905,6 +1918,16 @@ _BATCH_UI_CSS = """
     border-top: 1px solid var(--border-color-primary, #e5e5e5);
     box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.08);
 }
+#batch_results_sync,
+.batch-sync-hidden {
+    position: absolute !important;
+    width: 1px !important;
+    height: 1px !important;
+    overflow: hidden !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+    clip: rect(0, 0, 0, 0) !important;
+}
 /* 避免底部固定栏遮挡结果表格与操作区 */
 #batch_results_html {
     margin-bottom: 72px;
@@ -1925,16 +1948,16 @@ _BATCH_UI_CSS = """
 }
 #batch_results_html th:nth-child(1),
 #batch_results_html td:nth-child(1) {
-    width: 90px;
-    text-align: center;
-}
-#batch_results_html th:nth-child(2),
-#batch_results_html td:nth-child(2) {
     width: 160px;
+}
+#batch_results_html th:nth-child(3),
+#batch_results_html td:nth-child(3) {
+    width: 240px;
 }
 #batch_results_html th:nth-child(4),
 #batch_results_html td:nth-child(4) {
-    width: 240px;
+    width: 90px;
+    text-align: center;
 }
 #batch_results_html audio {
     width: 100%;
@@ -1944,7 +1967,7 @@ _BATCH_UI_CSS = """
 #batch_results_html * {
     pointer-events: auto !important;
 }
-#batch_results_html td:first-child {
+#batch_results_html td:last-child {
     cursor: pointer;
 }
 #batch_results_html .regen-lab,
@@ -2137,7 +2160,7 @@ _BATCH_UI_CSS = """
 #batch_results_html textarea.batch-result-textarea:focus {
     border-color: var(--color-accent, #2563eb);
 }
-#batch_results_html th:nth-child(3),
+#batch_results_html th:nth-child(2),
 #batch_results_html td.batch-result-text {
     min-width: 280px;
     height: auto !important;
@@ -2393,6 +2416,10 @@ _BATCH_UI_HEAD = """
       try { data = JSON.parse(payload); } catch (e) { return; }
     }
     if (!data || !data.action) return;
+    if (typeof data.seq === "number") {
+      if (data.seq < (window._resultsSyncSeq || 0)) return;
+      window._resultsSyncSeq = data.seq;
+    }
     var tbody = document.getElementById("batch_results_tbody");
     if (!tbody) return;
     function addRow(row, overwriteText) {
@@ -2440,10 +2467,10 @@ _BATCH_UI_HEAD = """
       audio.preload = "metadata";
       audio.src = row.audio_url || "";
       td3.appendChild(audio);
-      tr.appendChild(td0);
       tr.appendChild(td1);
       tr.appendChild(td2);
       tr.appendChild(td3);
+      tr.appendChild(td0);
       tbody.appendChild(tr);
     }
     if (data.action === "reset") {
@@ -2484,19 +2511,29 @@ _BATCH_UI_HEAD = """
       applyBatchResults({ action: "append", row: row });
     });
   }
+  function drainResultsSync() {
+    var box = document.querySelector("#batch_results_sync textarea") || document.querySelector("#batch_results_sync input");
+    if (!box) return;
+    var val = box.value || "";
+    if (val === (window._lastResultsSync || "")) return;
+    window._lastResultsSync = val;
+    applyBatchResults(val);
+  }
   function hookResultsSync() {
     var box = document.querySelector("#batch_results_sync textarea") || document.querySelector("#batch_results_sync input");
-    if (!box || box.dataset.hooked === "1") return;
-    box.dataset.hooked = "1";
-    var last = "";
-    function drain() {
-      if (box.value !== last) {
-        last = box.value;
-        applyBatchResults(box.value);
-      }
+    if (!box) return;
+    if (box.dataset.hooked !== "1") {
+      box.dataset.hooked = "1";
+      box.addEventListener("input", drainResultsSync);
+      box.addEventListener("change", drainResultsSync);
     }
-    box.addEventListener("input", drain);
-    box.addEventListener("change", drain);
+    drainResultsSync();
+    if (!window._resultsSyncTimer) {
+      window._resultsSyncTimer = setInterval(function () {
+        drainResultsSync();
+        restoreResultsIfNeeded();
+      }, 400);
+    }
   }
   function headerText(el) {
     return String(el && el.textContent || "").replace(/\\s+/g, "");
@@ -3060,7 +3097,7 @@ with gr.Blocks(title="GPT-SoVITS WebUI", css=_BATCH_UI_CSS, head=_BATCH_UI_HEAD)
                     value=(
                         '<div id="batch_results_html">'
                         '<table><thead><tr>'
-                        '<th>待重生成</th><th>文件名</th><th>文本内容</th><th>音频预览</th>'
+                        '<th>文件名</th><th>文本内容</th><th>音频预览</th><th>待重生成</th>'
                         '</tr></thead>'
                         '<tbody id="batch_results_tbody"></tbody>'
                         '</table></div>'
@@ -3068,7 +3105,7 @@ with gr.Blocks(title="GPT-SoVITS WebUI", css=_BATCH_UI_CSS, head=_BATCH_UI_HEAD)
                     elem_id="batch_results_wrap",
                 )
                 batch_results_state = gr.State([])
-                results_sync = gr.Textbox(visible=False, elem_id="batch_results_sync")
+                results_sync = gr.Textbox(value="", visible=True, elem_id="batch_results_sync", elem_classes=["batch-sync-hidden"])
                 regen_checked_json = gr.Textbox(value="[]", visible=False, elem_id="regen_checked_json")
                 results_rows_json = gr.Textbox(value="[]", visible=False, elem_id="results_rows_json")
                 batch_process_flags = gr.Textbox(value="[]", visible=False, elem_id="batch_process_flags")
@@ -3199,14 +3236,12 @@ with gr.Blocks(title="GPT-SoVITS WebUI", css=_BATCH_UI_CSS, head=_BATCH_UI_HEAD)
                     js="() => { document.querySelectorAll('#batch_results_tbody .regen-check').forEach(c => { c.checked = false; }); }",
                 )
 
-                def _apply_results_sync(payload):
-                    return None
-
                 results_sync.change(
-                    _apply_results_sync,
+                    lambda p: None,
                     [results_sync],
                     [],
-                    js="(p) => { if (window.applyBatchResults) window.applyBatchResults(p); return p; }",
+                    js="(p) => { if (window.applyBatchResults) window.applyBatchResults(p); }",
+                    queue=False,
                 )
 
                 batch_file.change(

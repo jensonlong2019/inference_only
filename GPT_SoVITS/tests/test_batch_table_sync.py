@@ -26,17 +26,21 @@ def _load_apply_fns():
         "_lookup_named_value",
         "_apply_process_flags_to_df",
         "_apply_preview_texts_to_df",
+        "_results_sync_payload",
     }
     chunks = []
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in wanted:
             chunks.append(ast.get_source_segment(src, node))
-    ns = {"json": json, "pd": pd}
+    ns = {"json": json, "pd": pd, "_results_sync_seq": 0}
     exec("\n\n".join(chunks), ns, ns)
-    return ns["_apply_process_flags_to_df"], ns["_apply_preview_texts_to_df"]
+    return ns
 
 
-_apply_process_flags_to_df, _apply_preview_texts_to_df = _load_apply_fns()
+_FNS = _load_apply_fns()
+_apply_process_flags_to_df = _FNS["_apply_process_flags_to_df"]
+_apply_preview_texts_to_df = _FNS["_apply_preview_texts_to_df"]
+_results_sync_payload = _FNS["_results_sync_payload"]
 
 
 def _sample_df():
@@ -151,6 +155,28 @@ class ApplyPreviewTextsTests(unittest.TestCase):
         out = _apply_preview_texts_to_df(df, legacy, "配音内容", name_column="命名")
         self.assertEqual(out.loc[out["命名"] == "2", "配音内容"].iloc[0], "把变色后的试纸和标准比色卡对比。")
         self.assertEqual(out.loc[out["命名"] == "3", "配音内容"].iloc[0], "【PH】的数值一般在0到14之间：")
+
+
+class BatchResultsSyncTests(unittest.TestCase):
+    def test_replace_payload_keeps_every_generated_row(self):
+        rows = [
+            {"filename": "2", "text": "a", "audio_url": "/file=2.mp3"},
+            {"filename": "3", "text": "b", "audio_url": "/file=3.mp3"},
+            {"filename": "4", "text": "c", "audio_url": "/file=4.mp3"},
+            {"filename": "5", "text": "d", "audio_url": "/file=5.mp3"},
+        ]
+        payload = json.loads(_results_sync_payload("replace", rows=rows))
+        self.assertEqual(payload["action"], "replace")
+        self.assertEqual([r["filename"] for r in payload["rows"]], ["2", "3", "4", "5"])
+
+    def test_batch_generation_finishes_with_full_replace(self):
+        src = (WEBROOT / "inference_webui.py").read_text(encoding="utf-8")
+        done = [line for line in src.splitlines() if "处理完成" in line and "yield" in line]
+        self.assertTrue(done, "missing completion yield")
+        self.assertTrue(
+            any('_results_sync_payload("replace", rows=results_list)' in line for line in done),
+            "完成时必须把已生成的全部行 replace 回结果表，不能只用 gr.update() 留下部分 append",
+        )
 
 
 if __name__ == "__main__":
