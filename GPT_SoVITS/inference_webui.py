@@ -2195,6 +2195,22 @@ _BATCH_UI_HEAD = """
   }
   window._resultTextCache = window._resultTextCache || {};
   window._resultRows = window._resultRows || [];
+  window._regenChecked = window._regenChecked || {};
+  function setRegenChecked(filename, checked) {
+    if (!filename) return;
+    window._regenChecked[String(filename)] = !!checked;
+  }
+  function regenCheckedFor(filename) {
+    return !!(filename && window._regenChecked[String(filename)]);
+  }
+  function cacheRegenCheckedFromDom() {
+    var tbody = document.getElementById("batch_results_tbody");
+    if (!tbody) return;
+    Array.prototype.forEach.call(tbody.querySelectorAll(".regen-check"), function (cb) {
+      var name = cb.getAttribute("data-name");
+      if (name) window._regenChecked[String(name)] = !!cb.checked;
+    });
+  }
   function cacheResultText(filename, text) {
     if (!filename) return;
     window._resultTextCache[filename] = text == null ? "" : String(text);
@@ -2210,6 +2226,7 @@ _BATCH_UI_HEAD = """
     if (data.action === "reset") {
       window._resultRows = [];
       window._resultTextCache = {};
+      window._regenChecked = {};
       return;
     }
     if (data.action === "replace") {
@@ -2464,12 +2481,15 @@ _BATCH_UI_HEAD = """
       cb.type = "checkbox";
       cb.className = "regen-check";
       cb.setAttribute("data-name", row.filename);
+      cb.checked = regenCheckedFor(row.filename);
+      cb.addEventListener("change", function () { setRegenChecked(row.filename, cb.checked); });
       lab.appendChild(cb);
       td0.appendChild(lab);
       td0.addEventListener("click", function (e) {
         e.stopPropagation();
         if (e.target === cb) return;
         cb.checked = !cb.checked;
+        setRegenChecked(row.filename, cb.checked);
       });
       var td1 = document.createElement("td");
       td1.textContent = row.filename || "";
@@ -2492,7 +2512,10 @@ _BATCH_UI_HEAD = """
       tbody.innerHTML = "";
       return;
     }
-    if (data.action === "replace") tbody.innerHTML = "";
+    if (data.action === "replace") {
+      cacheRegenCheckedFromDom();
+      tbody.innerHTML = "";
+    }
     if (data.action === "append" || data.action === "sync" || data.action === "replace") {
       (window._resultRows || []).forEach(function (row) { addRow(row, data.action === "replace"); });
       scheduleFitResultTextareas();
@@ -2545,12 +2568,14 @@ _BATCH_UI_HEAD = """
     if (!window._resultsVisibilityHook) {
       window._resultsVisibilityHook = true;
       document.addEventListener("visibilitychange", function () {
+        if (document.visibilityState === "hidden") cacheRegenCheckedFromDom();
         if (document.visibilityState === "visible") window._forceResultsResync = true;
       });
     }
     if (!window._resultsSyncTimer) {
       window._resultsSyncTimer = setInterval(function () {
         var panelVisible = batchResultsPanelVisible();
+        if (!panelVisible && window._resultsPanelVisible) cacheRegenCheckedFromDom();
         if (panelVisible && (window._forceResultsResync || window._resultsPanelVisible === false)) {
           window._lastResultsSync = "";
           window._forceResultsResync = false;
@@ -3259,7 +3284,7 @@ with gr.Blocks(title="GPT-SoVITS WebUI", css=_BATCH_UI_CSS, head=_BATCH_UI_HEAD)
                 )
                 btn_clear_regen_marks.click(
                     lambda: None,
-                    js="() => { document.querySelectorAll('#batch_results_tbody .regen-check').forEach(c => { c.checked = false; }); }",
+                    js="() => { window._regenChecked = window._regenChecked || {}; document.querySelectorAll('#batch_results_tbody .regen-check').forEach(c => { c.checked = false; var name = c.getAttribute('data-name'); if (name) window._regenChecked[name] = false; }); }",
                 )
 
                 results_sync.change(

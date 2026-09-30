@@ -194,6 +194,8 @@ class BatchResultsSyncTests(unittest.TestCase):
         )
         self.assertIn('data.action === "sync"', src)
         self.assertIn("rememberResultPayload(data)", src)
+        self.assertIn("window._regenChecked", src)
+        self.assertIn("cb.checked = regenCheckedFor(row.filename)", src)
 
 
 if __name__ == "__main__":
