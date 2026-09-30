@@ -169,6 +169,16 @@ class BatchResultsSyncTests(unittest.TestCase):
         self.assertEqual(payload["action"], "replace")
         self.assertEqual([r["filename"] for r in payload["rows"]], ["2", "3", "4", "5"])
 
+    def test_sync_payload_keeps_every_row_generated_so_far(self):
+        rows = [
+            {"filename": "1", "text": "a", "audio_url": "/file=1.mp3"},
+            {"filename": "2", "text": "b", "audio_url": "/file=2.mp3"},
+        ]
+        payload = json.loads(_results_sync_payload("sync", row=rows[-1], rows=rows))
+        self.assertEqual(payload["action"], "sync")
+        self.assertEqual(payload["row"]["filename"], "2")
+        self.assertEqual([r["filename"] for r in payload["rows"]], ["1", "2"])
+
     def test_batch_generation_finishes_with_full_replace(self):
         src = (WEBROOT / "inference_webui.py").read_text(encoding="utf-8")
         done = [line for line in src.splitlines() if "处理完成" in line and "yield" in line]
@@ -177,6 +187,13 @@ class BatchResultsSyncTests(unittest.TestCase):
             any('_results_sync_payload("replace", rows=results_list)' in line for line in done),
             "完成时必须把已生成的全部行 replace 回结果表，不能只用 gr.update() 留下部分 append",
         )
+        self.assertIn(
+            '_results_sync_payload("sync", row=item, rows=results_list)',
+            src,
+            "每生成一条都要带上迄今全部行，切走再回来不能只剩最后一条",
+        )
+        self.assertIn('data.action === "sync"', src)
+        self.assertIn("rememberResultPayload(data)", src)
 
 
 if __name__ == "__main__":

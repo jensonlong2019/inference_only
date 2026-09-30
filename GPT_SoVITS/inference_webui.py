@@ -1763,8 +1763,8 @@ def batch_generation(file, name_column, text_column, data_frame, ref_wav_path, p
                 audio_url = f"/file={final_path}?t={timestamp}"
                 item = {"filename": filename_str, "text": text, "audio_url": audio_url}
                 results_list.append(item)
-                # 只追加这一行，不整表回传，避免已生成音频被刷新
-                yield f"已处理 {index+1}/{total} 条: [{filename_str}]", _results_sync_payload("append", row=item), results_list
+                # 带上迄今全部行。切到其他页时中间的 append 会丢，回来只剩最后一条消息。
+                yield f"已处理 {index+1}/{total} 条: [{filename_str}]", _results_sync_payload("sync", row=item, rows=results_list), results_list
 
             else:
                 print(f"第 {index+1} 条生成结果为空")
@@ -2205,6 +2205,22 @@ _BATCH_UI_HEAD = """
     }
     return fallback == null ? "" : String(fallback);
   }
+  function rememberResultPayload(data) {
+    if (!data || !data.action) return;
+    if (data.action === "reset") {
+      window._resultRows = [];
+      window._resultTextCache = {};
+      return;
+    }
+    if (data.action === "replace") {
+      window._resultRows = [];
+      window._resultTextCache = {};
+      (data.rows || []).forEach(function (row) { upsertResultRow(row, true); });
+      return;
+    }
+    if (data.row) upsertResultRow(data.row, false);
+    (data.rows || []).forEach(function (row) { upsertResultRow(row, false); });
+  }
   function upsertResultRow(row, overwriteText) {
     if (!row || !row.filename) return;
     var key = String(row.filename);
@@ -2260,10 +2276,7 @@ _BATCH_UI_HEAD = """
         }
       });
     }
-    if (rows.length) {
-      window._resultRows = rows;
-      return rows;
-    }
+    rows.forEach(function (row) { upsertResultRow(row, true); });
     return (window._resultRows || []).map(function (r) {
       return {
         filename: r.filename,
@@ -2420,6 +2433,8 @@ _BATCH_UI_HEAD = """
       if (data.seq < (window._resultsSyncSeq || 0)) return;
       window._resultsSyncSeq = data.seq;
     }
+    // 表格节点还没挂上时也先记下全部行，避免切页期间把这批结果丢掉
+    rememberResultPayload(data);
     var tbody = document.getElementById("batch_results_tbody");
     if (!tbody) return;
     function addRow(row, overwriteText) {
@@ -2475,20 +2490,11 @@ _BATCH_UI_HEAD = """
     }
     if (data.action === "reset") {
       tbody.innerHTML = "";
-      window._resultRows = [];
-      window._resultTextCache = {};
       return;
     }
-    if (data.action === "append" && data.row) {
-      addRow(data.row, false);
-      scheduleFitResultTextareas();
-      return;
-    }
-    if (data.action === "replace") {
-      tbody.innerHTML = "";
-      window._resultRows = [];
-      window._resultTextCache = {};
-      (data.rows || []).forEach(function (row) { addRow(row, true); });
+    if (data.action === "replace") tbody.innerHTML = "";
+    if (data.action === "append" || data.action === "sync" || data.action === "replace") {
+      (window._resultRows || []).forEach(function (row) { addRow(row, data.action === "replace"); });
       scheduleFitResultTextareas();
     }
   }
@@ -2507,9 +2513,17 @@ _BATCH_UI_HEAD = """
       }
     }
     if (!missing) return;
-    rows.slice().forEach(function (row) {
-      applyBatchResults({ action: "append", row: row });
-    });
+    applyBatchResults({ action: "sync", rows: rows.slice() });
+  }
+  function batchResultsPanelVisible() {
+    var tbody = document.getElementById("batch_results_tbody");
+    if (!tbody) return false;
+    var el = tbody;
+    while (el && el !== document.documentElement) {
+      if (window.getComputedStyle(el).display === "none") return false;
+      el = el.parentElement;
+    }
+    return true;
   }
   function drainResultsSync() {
     var box = document.querySelector("#batch_results_sync textarea") || document.querySelector("#batch_results_sync input");
@@ -2528,8 +2542,20 @@ _BATCH_UI_HEAD = """
       box.addEventListener("change", drainResultsSync);
     }
     drainResultsSync();
+    if (!window._resultsVisibilityHook) {
+      window._resultsVisibilityHook = true;
+      document.addEventListener("visibilitychange", function () {
+        if (document.visibilityState === "visible") window._forceResultsResync = true;
+      });
+    }
     if (!window._resultsSyncTimer) {
       window._resultsSyncTimer = setInterval(function () {
+        var panelVisible = batchResultsPanelVisible();
+        if (panelVisible && (window._forceResultsResync || window._resultsPanelVisible === false)) {
+          window._lastResultsSync = "";
+          window._forceResultsResync = false;
+        }
+        window._resultsPanelVisible = panelVisible;
         drainResultsSync();
         restoreResultsIfNeeded();
       }, 400);
